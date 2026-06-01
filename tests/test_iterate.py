@@ -60,8 +60,8 @@ def test_summarize_error_none_on_empty():
 def test_summarize_error_occ_kernel():
     s = core.summarize_error(OCC_FILLET_TB)
     assert s is not None
-    # the final exception line is the most informative one
-    assert "StdFail_NotDone" in s["error_type"] or "StdFail" in s["error_type"]
+    # the dotted OCC leaf is extracted exactly (not the full OCP.OCP.StdFail...)
+    assert s["error_type"] == "StdFail_NotDone"
     assert "BRep_API" in s["message"]
     # OCC "command not done" → a hint about fillet/chamfer radius
     assert "fillet" in s["hint"].lower() or "radius" in s["hint"].lower()
@@ -183,6 +183,27 @@ def test_retry_passes_summarized_error_to_code_fn():
 
     assert seen[0] is None                          # first attempt: clean
     assert seen[1]["error_type"] == "NameError"     # second: structured error
+
+
+def test_retry_reuses_out_dir_across_attempts():
+    # A failed attempt's out_dir must be reused on the next attempt so artifacts
+    # land together (guards core.py's `out_dir = out_dir or result.get(...)`).
+    seen_out_dirs = []
+
+    def fake_generate(code, out_dir=None, stem="part"):
+        seen_out_dirs.append(out_dir)
+        if len(seen_out_dirs) == 1:
+            return {"success": False, "stl": None, "step": None,
+                    "stderr": OCC_FILLET_TB, "stdout": "", "out_dir": "/tmp/cad_attempt1"}
+        return {"success": True, "stl": "/tmp/cad_attempt1/part.stl",
+                "step": None, "stderr": "", "stdout": "", "out_dir": "/tmp/cad_attempt1"}
+
+    with mock.patch.object(core, "generate", side_effect=fake_generate):
+        core.generate_with_retry(lambda obs: "code", prompt="a cube",
+                                 out_dir=None, max_iters=3)
+
+    assert seen_out_dirs[0] is None                  # harness picks a dir
+    assert seen_out_dirs[1] == "/tmp/cad_attempt1"   # second attempt reuses it
 
 
 def test_retry_first_attempt_succeeds_no_loop():

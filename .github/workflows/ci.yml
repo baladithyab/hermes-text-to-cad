@@ -36,14 +36,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
-      # Contract + core unit tests only — integration is skipped (no CAD venv).
-      - name: Run unit tests
-        run: pytest tests/test_plugin_contract.py tests/test_core.py -q
-
-      # The integration suite must still *collect* and *skip* cleanly, never
-      # error, when the CAD venv is absent.
-      - name: Verify integration suite skips cleanly
-        run: pytest tests/test_integration.py -q -rs
+      # Run the WHOLE suite (not a hand-listed subset, which silently drifts as
+      # new test files are added). Integration auto-skips because
+      # HERMES_CAD_PYTHON points at a nonexistent path; -rs reports the skips so
+      # the exclusion is visible rather than silent.
+      - name: Run test suite
+        run: pytest tests/ -q -rs
 
   smoke:
     name: pre-push smoke test

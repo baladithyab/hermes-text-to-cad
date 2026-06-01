@@ -2,7 +2,7 @@
 
 Assert the plugin's *contract* with the Hermes loader without booting a gateway:
   - plugin.yaml parses and matches the documented identity
-  - register(ctx) wires exactly the 4 documented tools + the `cad` CLI
+  - register(ctx) wires exactly the 5 documented tools + the `cad` CLI
   - every tool's JSON Schema (schema["parameters"]) is structurally valid
   - schema["name"] mirrors the registered tool name
   - the manifest's provides_tools list matches what register() actually wires

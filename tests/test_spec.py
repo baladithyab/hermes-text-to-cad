@@ -103,6 +103,23 @@ def test_derive_spec_counterbored_hole_counts_as_one():
     assert spec["through_holes"] == 1
 
 
+def test_derive_spec_mixed_blind_and_through():
+    # A blind hole adds no genus, but it must not suppress a genuine through-hole.
+    spec = core.derive_spec("a plate with a blind hole and one through hole")
+    assert spec["through_holes"] == 1
+
+
+def test_derive_spec_one_part_stays_single_shell():
+    # "1 part" is explicitly single-body; must not be clamped up to 2.
+    assert core.derive_spec("a 1 part design")["max_shells"] == 1
+    assert core.derive_spec("a 1-piece bracket")["max_shells"] == 1
+
+
+def test_derive_spec_two_part_is_multi_shell():
+    assert core.derive_spec("a 2-part snap-fit assembly")["max_shells"] == 2
+    assert core.derive_spec("a multi-part assembly")["max_shells"] == 2
+
+
 def test_derive_spec_defaults_watertight_true():
     spec = core.derive_spec("a 10x10x10 cube")
     assert spec["watertight"] is True

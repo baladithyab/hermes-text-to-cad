@@ -53,26 +53,32 @@ def measure(path):
         except Exception:
             n_shells = None
 
-    # Topology: genus = (2 - euler_number) / 2 for a closed orientable surface.
-    # genus counts handle-like holes (tunnels) — the # of through-holes for a
-    # single-body part. This is the CADTests centerpiece: a solid box (genus 0)
-    # and a box with a through-hole (genus 1) have IDENTICAL bounding boxes but
-    # different genus, so a bbox-only gate can't tell them apart but this can.
+    # Topology: for ONE closed orientable surface, genus = (2 - euler) / 2 and
+    # equals its handle (tunnel) count — i.e. the # of through-holes. This is the
+    # CADTests centerpiece: a solid box (genus 0) and a box with a through-hole
+    # (genus 1) have IDENTICAL bounding boxes but different genus, so a bbox-only
+    # gate can't tell them apart but this can.
+    #
+    # The (2 - euler)/2 formula is ONLY valid for a single connected watertight
+    # body. For S separate bodies trimesh reports euler = 2S, so (2 - euler)/2 =
+    # 1 - S goes negative (e.g. two boxes -> -1) — garbage. So we only define
+    # genus/through_holes for the single-body watertight case and leave both None
+    # otherwise (the gate then skips those checks rather than comparing nonsense).
+    # NOTE: genus counts handles, which for a single body also includes any fully
+    # ENCLOSED cavity's contribution; a sealed internal void instead shows up as
+    # an extra shell (n_shells > 1), so the single-body guard keeps a sealed
+    # hollow part out of the through-hole count. Detecting an open tunnel vs a
+    # blind pocket precisely needs a ray/section backend (deferred — see header).
     genus = None
     through_holes = None
     try:
-        euler = int(m.euler_number)
-        g = (2 - euler) / 2.0
-        # genus is an integer for a clean manifold; round defensively.
-        genus = int(round(g))
-        if m.is_watertight and n_shells is not None:
-            # For S connected watertight bodies, total genus = sum of per-body
-            # genera; through-holes per single body == its genus. We report the
-            # total genus and, for the common single-body case, equate it to the
-            # through-hole count.
-            through_holes = genus if n_shells == 1 else None
+        if m.is_watertight and n_shells == 1:
+            euler = int(m.euler_number)
+            genus = int(round((2 - euler) / 2.0))
+            through_holes = genus
     except Exception:
         genus = None
+        through_holes = None
 
     # Solidity: volume / convex-hull volume. ~1.0 for convex/filled parts; drops
     # as material is removed (pockets, holes, lattices). A cheap shape signal.
@@ -95,11 +101,18 @@ def measure(path):
         "n_faces": int(len(m.faces)),
         "n_vertices": int(len(m.vertices)),
         "n_shells": n_shells,
-        "euler_number": int(m.euler_number) if genus is not None else None,
+        "euler_number": _safe_int(lambda: m.euler_number),
         "genus": genus,
         "through_holes": through_holes,
         "solidity": solidity,
     }
+
+
+def _safe_int(fn):
+    try:
+        return int(fn())
+    except Exception:
+        return None
 
 
 def gate(meas, spec):

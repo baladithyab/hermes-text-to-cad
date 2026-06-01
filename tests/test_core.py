@@ -45,14 +45,19 @@ def patch_run(returncode=0, stdout="", stderr="", side_effect=None):
     )
 
 
-def gen_side_effect(create_stl=True, create_step=False, returncode=0, stdout="", stderr=""):
-    """side_effect for generate(): optionally writes the expected STL/STEP."""
+def gen_side_effect(create_stl=True, create_step=False, returncode=0, stdout="",
+                    stderr="", stl_bytes=b"solid x\nendsolid x\n"):
+    """side_effect for generate(): optionally writes the expected STL/STEP.
+
+    stl_bytes lets a test write a zero-byte STL (b"") to exercise the
+    non-empty-file guard.
+    """
     def _se(args, **kwargs):
         cad_out = Path(kwargs["env"]["CAD_OUT"])
         script = Path(args[1])              # args = [py, "<out>/<stem>_gen.py"]
         stem = script.name[: -len("_gen.py")]
         if create_stl:
-            (cad_out / f"{stem}.stl").write_bytes(b"solid x\nendsolid x\n")
+            (cad_out / f"{stem}.stl").write_bytes(stl_bytes)
         if create_step:
             (cad_out / f"{stem}.step").write_text("ISO-10303-21;\n")
         return CompletedStub(returncode, stdout, stderr)
@@ -103,6 +108,16 @@ def test_generate_failure_when_no_stl(tmp_path, monkeypatch):
     assert res["success"] is False
     assert res["stl"] is None
     assert res["step"] is None
+
+
+def test_generate_failure_when_stl_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    # exit 0 and the STL file exists but is ZERO bytes (export touched then
+    # aborted) → not a success. Guards the `stat().st_size > 0` check.
+    with patch_run(side_effect=gen_side_effect(create_stl=True, stl_bytes=b"", returncode=0)):
+        res = core.generate(code="pass", out_dir=str(tmp_path))
+    assert res["success"] is False
+    assert res["stl"] is None
 
 
 def test_generate_surfaces_traceback_on_error(tmp_path, monkeypatch):
@@ -290,6 +305,42 @@ def test_doctor_not_ready_when_venv_missing(monkeypatch):
     by_name = {c["check"]: c for c in rep["checks"]}
     assert by_name["cad_venv_exists"]["pass"] is False
     assert by_name["cad_libs_import"]["pass"] is False
+
+
+def test_doctor_ready_but_vision_not_ready_without_key(tmp_path, monkeypatch):
+    # The plugin's whole "optional cred" design: core can be ready while the
+    # vision gate is not, purely because OPENROUTER_API_KEY is absent. Isolates
+    # the key's contribution to vision_ready (kills the `vision_ready: core_ok`
+    # mutant).
+    fake_py = tmp_path / "bin" / "python"
+    fake_py.parent.mkdir(parents=True)
+    fake_py.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("HERMES_CAD_PYTHON", str(fake_py))
+    monkeypatch.setattr(core, "venv_ready", lambda: True)   # libs import OK
+    monkeypatch.setattr(core, "_has_openrouter_key", lambda: False)
+    rep = core.doctor()
+    assert rep["ready"] is True
+    assert rep["vision_ready"] is False
+
+
+def test_doctor_not_ready_when_a_script_missing(tmp_path, monkeypatch):
+    # venv + libs present, but a required script is missing → ready must be False.
+    # Isolates scripts_ok's contribution to the ready verdict.
+    fake_py = tmp_path / "bin" / "python"
+    fake_py.parent.mkdir(parents=True)
+    fake_py.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("HERMES_CAD_PYTHON", str(fake_py))
+    monkeypatch.setattr(core, "venv_ready", lambda: True)
+    monkeypatch.setattr(core, "_has_openrouter_key", lambda: True)
+    empty_scripts = tmp_path / "scripts"     # exists but contains none of the 3
+    empty_scripts.mkdir()
+    monkeypatch.setattr(core, "SCRIPTS", empty_scripts)
+    rep = core.doctor()
+    by_name = {c["check"]: c for c in rep["checks"]}
+    assert by_name["cad_venv_exists"]["pass"] is True
+    assert by_name["cad_libs_import"]["pass"] is True
+    assert by_name["scripts_present"]["pass"] is False
+    assert rep["ready"] is False
 
 
 # ---- _has_openrouter_key ------------------------------------------------------

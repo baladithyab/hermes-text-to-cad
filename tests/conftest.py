@@ -47,12 +47,15 @@ def load_plugin_module():
 
 
 class FakeCtx:
-    """Minimal stand-in for the Hermes plugin registration context.
+    """Stand-in for the Hermes plugin registration context.
 
-    Mirrors the real ctx surface: register_tool(name, handler, description,
-    schema, toolset=, emoji=, requires_env=) and register_cli_command(name,
-    setup_fn=, handler_fn=, help=, description=). Records every call so contract
-    tests can assert exactly what the plugin wires up.
+    Replicates the register_tool / register_cli_command signatures verified
+    against Hermes at authoring time; it is NOT enforced against the live Hermes
+    package (which isn't importable in the test env). To catch signature drift
+    early, it REJECTS unknown kwargs — if the plugin starts passing a kwarg this
+    stub doesn't model, the contract test fails loudly rather than silently
+    passing against a stale stub. Records every call so contract tests can
+    assert exactly what the plugin wires up.
     """
 
     def __init__(self):
@@ -61,6 +64,11 @@ class FakeCtx:
 
     def register_tool(self, name, handler=None, description=None, schema=None,
                       toolset=None, emoji=None, requires_env=None, **extra):
+        if extra:
+            raise AssertionError(
+                f"register_tool({name!r}) got unmodeled kwargs {sorted(extra)} — "
+                "FakeCtx may be out of sync with the real Hermes signature"
+            )
         if name in self.tools:
             raise AssertionError(f"tool registered twice: {name}")
         self.tools[name] = {
@@ -70,11 +78,15 @@ class FakeCtx:
             "toolset": toolset,
             "emoji": emoji,
             "requires_env": requires_env,
-            "extra": extra,
         }
 
     def register_cli_command(self, name, setup_fn=None, handler_fn=None,
                              help=None, description=None, **extra):
+        if extra:
+            raise AssertionError(
+                f"register_cli_command({name!r}) got unmodeled kwargs {sorted(extra)} — "
+                "FakeCtx may be out of sync with the real Hermes signature"
+            )
         if name in self.cli_commands:
             raise AssertionError(f"cli command registered twice: {name}")
         self.cli_commands[name] = {
@@ -82,7 +94,6 @@ class FakeCtx:
             "handler_fn": handler_fn,
             "help": help,
             "description": description,
-            "extra": extra,
         }
 
 

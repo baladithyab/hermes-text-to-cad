@@ -141,6 +141,26 @@ def test_solid_box_genus_zero():
     assert meas["solidity"] == pytest.approx(1.0, abs=1e-3)
 
 
+def test_multibody_genus_is_none_not_negative(tmp_path):
+    """Two disjoint boxes: euler=4, so the naive (2-euler)/2 gives a bogus -1.
+    measure() must report genus/through_holes as None for multi-body meshes so
+    the gate skips them rather than comparing against garbage."""
+    code = (
+        "import cadquery as cq, os\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        "a = cq.Workplane('XY').box(10, 10, 10)\n"
+        "b = cq.Workplane('XY').box(10, 10, 10).translate((30, 0, 0))\n"
+        "part = a.union(b, clean=False)\n"
+        "cq.exporters.export(part, os.path.join(OUT, 'part.stl'))\n"
+    )
+    gen = core.generate(code=code, out_dir=str(tmp_path), stem="part")
+    assert gen["success"], gen.get("stderr")
+    meas = core.measure(stl=gen["stl"])["report"]["measured"]
+    assert meas["n_shells"] == 2
+    assert meas["genus"] is None
+    assert meas["through_holes"] is None
+
+
 # ---- Wave 1.2: ReAct error-feedback loop, end-to-end (real OCC failure) ------
 
 def test_react_loop_autocorrects_bad_fillet(tmp_path):

@@ -107,11 +107,14 @@ def derive_spec(prompt: str) -> dict[str, Any]:
         spec["bbox_mm"] = [float(m.group(1)), float(m.group(2)), float(m.group(3))]
 
     # Through-holes. Skip entirely if the prompt NEGATES holes ("hole-free",
-    # "no holes") or describes only a blind hole (which adds no genus). Then look
-    # for a through/mounting hole phrase with an optional leading count
+    # "no holes"). Blind holes add no genus, so STRIP blind-hole phrases first
+    # (rather than skipping the whole branch) — that way "two blind holes and one
+    # through hole" still counts the genuine through-hole. Then look for a
+    # through/mounting hole phrase with an optional leading count
     # ("4 mounting holes", "three through-holes", "12-hole flange").
-    if not _NO_HOLE_RE.search(low) and not _BLIND_RE.search(low):
-        hm = _THROUGH_HOLE_RE.search(low)
+    if not _NO_HOLE_RE.search(low):
+        low_through = _BLIND_RE.sub(" ", low)  # drop blind-hole phrases
+        hm = _THROUGH_HOLE_RE.search(low_through)
         if hm:
             num, word = hm.group(1), hm.group(2)
             if num:
@@ -122,11 +125,14 @@ def derive_spec(prompt: str) -> dict[str, Any]:
                 count = 1  # bare "hole" / "...with a hole"
             spec["through_holes"] = count
 
-    # Multi-body intent relaxes the single-shell default.
+    # Multi-body intent relaxes the single-shell default. A numeric "N part(s)"
+    # count is taken literally (so "1 part" stays single-body); the bare keyword
+    # forms (assembly / two-part / multi-part / snap-fit) imply at least 2.
     am = _ASSEMBLY_RE.search(low)
-    if am:
-        n = int(am.group(1)) if am.group(1) else 2
-        spec["max_shells"] = max(2, n)
+    if am and am.group(1):
+        spec["max_shells"] = max(1, int(am.group(1)))
+    elif am:
+        spec["max_shells"] = 2
     else:
         spec["max_shells"] = 1
 

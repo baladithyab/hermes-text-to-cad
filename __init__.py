@@ -185,4 +185,4 @@ def register(ctx: Any) -> None:
         handler_fn=_cli_cad,
         description="hermes-text-to-cad plugin CLI",
     )
-    logger.info("hermes-text-to-cad: registered 4 tools + `cad` CLI")
+    logger.info("hermes-text-to-cad: registered 5 tools + `cad` CLI")
