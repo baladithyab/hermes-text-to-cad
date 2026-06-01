@@ -89,3 +89,53 @@ def test_render_produces_montage(generated):
     assert res["success"] is True, res.get("stderr")
     assert res["montage"] and Path(res["montage"]).exists()
     assert res["backend"] in ("vtk", "matplotlib")
+
+
+# ---- Wave 1.1: prompt-derived geometric gate, end-to-end (real geometry) -----
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def test_topological_gate_catches_missing_through_hole(tmp_path):
+    """The CADTests headline, end-to-end against committed fixtures.
+
+    holed_box and solid_box have IDENTICAL bounding boxes. A prompt asking for a
+    through-hole derives through_holes==1; the gate must PASS the holed box and
+    FAIL the solid box — something a bbox-only gate cannot do.
+    """
+    spec = core.spec_from_prompt(
+        "a 40x30x20 block with a through hole",
+        out_path=str(tmp_path / "spec.json"),
+    )
+    assert spec["spec"]["through_holes"] == 1
+    spec_path = spec["spec_path"]
+
+    holed = core.measure(stl=str(FIXTURES / "holed_box.stl"), spec_path=spec_path)
+    solid = core.measure(stl=str(FIXTURES / "solid_box.stl"), spec_path=spec_path)
+
+    # bbox passes for BOTH (identical extents) ...
+    holed_checks = {c["check"]: c["PASS"] for c in holed["report"]["gate"]["checks"]}
+    solid_checks = {c["check"]: c["PASS"] for c in solid["report"]["gate"]["checks"]}
+    assert holed_checks["bbox"] is True
+    assert solid_checks["bbox"] is True
+
+    # ... but the topological check separates them.
+    assert holed["gate_pass"] is True
+    assert solid["gate_pass"] is False
+    assert solid_checks["through_holes"] is False
+
+
+def test_measure_reports_topology_fields():
+    res = core.measure(stl=str(FIXTURES / "holed_box.stl"))
+    meas = res["report"]["measured"]
+    assert meas["genus"] == 1
+    assert meas["through_holes"] == 1
+    assert 0.0 < meas["solidity"] <= 1.0
+
+
+def test_solid_box_genus_zero():
+    res = core.measure(stl=str(FIXTURES / "solid_box.stl"))
+    meas = res["report"]["measured"]
+    assert meas["genus"] == 0
+    assert meas["through_holes"] == 0
+    assert meas["solidity"] == pytest.approx(1.0, abs=1e-3)

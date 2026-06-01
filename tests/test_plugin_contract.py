@@ -21,7 +21,9 @@ import yaml
 from jsonschema import Draft202012Validator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_TOOLS = {"cad_generate", "cad_render", "cad_measure", "cad_review"}
+EXPECTED_TOOLS = {
+    "cad_spec_from_prompt", "cad_generate", "cad_render", "cad_measure", "cad_review",
+}
 
 
 @pytest.fixture
@@ -60,9 +62,9 @@ def test_manifest_provides_tools_matches_register(manifest, registered):
 
 # ---- register() wiring --------------------------------------------------------
 
-def test_register_wires_exactly_four_tools(registered):
+def test_register_wires_expected_tools(registered):
     assert set(registered.tools.keys()) == EXPECTED_TOOLS
-    assert len(registered.tools) == 4
+    assert len(registered.tools) == len(EXPECTED_TOOLS)
 
 
 def test_register_wires_cad_cli(registered):
@@ -120,7 +122,7 @@ def test_vision_gate_declares_optional_cred(registered):
     # gateway can show it without blocking install. The numeric tools must NOT
     # require any env.
     assert registered.tools["cad_review"]["requires_env"] == ["OPENROUTER_API_KEY"]
-    for name in ("cad_generate", "cad_render", "cad_measure"):
+    for name in ("cad_spec_from_prompt", "cad_generate", "cad_render", "cad_measure"):
         assert not registered.tools[name]["requires_env"], (
             f"{name} must not require any env var (numeric path works offline)"
         )
@@ -131,6 +133,7 @@ def test_vision_gate_declares_optional_cred(registered):
 @pytest.mark.parametrize(
     "tool,required",
     [
+        ("cad_spec_from_prompt", ["prompt"]),
         ("cad_generate", ["code"]),
         ("cad_render", ["stl"]),
         ("cad_measure", ["stl"]),

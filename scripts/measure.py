@@ -17,8 +17,23 @@ spec.json (all keys optional):
       "watertight": true,          # require printable/manifold
       "min_volume_mm3": 100,
       "max_volume_mm3": 100000,
-      "max_shells": 1              # require a single connected body
+      "max_shells": 1,             # upper bound on connected bodies
+
+      # --- topological / feature-count vocabulary (CADTests pattern) ---
+      "shells": 1,                 # EXACT connected-body count
+      "through_holes": 1,          # # of holes that pass through the body (genus,
+                                   #   single-body parts). Catches a missing hole
+                                   #   that a bbox-only gate can't see — identical
+                                   #   bbox, different topology.
+      "genus": 1,                  # exact topological genus (handles/tunnels)
+      "min_solidity": 0.3,         # volume / convex-hull volume (>= )
+      "max_solidity": 1.0          # volume / convex-hull volume (<= )
     }
+
+Measured fields added for the above: euler_number, genus, through_holes, solidity.
+NOTE on feasibility: measured hole-DIAMETER and reliable wall-THICKNESS need
+ray/section backends (rtree/embree/shapely) not present in the minimal CAD venv,
+so they are intentionally not gated here — see PLAN.md Wave 1.1 deferral note.
 """
 import sys, os, json, argparse
 
@@ -37,6 +52,38 @@ def measure(path):
             n_shells = int(len(parts)) if parts is not None else None
         except Exception:
             n_shells = None
+
+    # Topology: genus = (2 - euler_number) / 2 for a closed orientable surface.
+    # genus counts handle-like holes (tunnels) — the # of through-holes for a
+    # single-body part. This is the CADTests centerpiece: a solid box (genus 0)
+    # and a box with a through-hole (genus 1) have IDENTICAL bounding boxes but
+    # different genus, so a bbox-only gate can't tell them apart but this can.
+    genus = None
+    through_holes = None
+    try:
+        euler = int(m.euler_number)
+        g = (2 - euler) / 2.0
+        # genus is an integer for a clean manifold; round defensively.
+        genus = int(round(g))
+        if m.is_watertight and n_shells is not None:
+            # For S connected watertight bodies, total genus = sum of per-body
+            # genera; through-holes per single body == its genus. We report the
+            # total genus and, for the common single-body case, equate it to the
+            # through-hole count.
+            through_holes = genus if n_shells == 1 else None
+    except Exception:
+        genus = None
+
+    # Solidity: volume / convex-hull volume. ~1.0 for convex/filled parts; drops
+    # as material is removed (pockets, holes, lattices). A cheap shape signal.
+    solidity = None
+    try:
+        ch_vol = float(m.convex_hull.volume)
+        if ch_vol > 0:
+            solidity = round(float(m.volume) / ch_vol, 4)
+    except Exception:
+        solidity = None
+
     return {
         "file": os.path.basename(path),
         "bbox_mm": [round(x, 3) for x in ext],
@@ -48,6 +95,10 @@ def measure(path):
         "n_faces": int(len(m.faces)),
         "n_vertices": int(len(m.vertices)),
         "n_shells": n_shells,
+        "euler_number": int(m.euler_number) if genus is not None else None,
+        "genus": genus,
+        "through_holes": through_holes,
+        "solidity": solidity,
     }
 
 
@@ -69,9 +120,35 @@ def gate(meas, spec):
     if "max_volume_mm3" in spec:
         add("max_volume", meas["volume_mm3"] <= spec["max_volume_mm3"],
             {"volume": meas["volume_mm3"], "max": spec["max_volume_mm3"]})
-    if "max_shells" in spec and meas["n_shells"] is not None:
+    if "max_shells" in spec and meas.get("n_shells") is not None:
         add("max_shells", meas["n_shells"] <= spec["max_shells"],
             {"n_shells": meas["n_shells"], "max": spec["max_shells"]})
+
+    # ---- topological / feature-count vocabulary (CADTests pattern) ----------
+    # Each check is additive and skipped when the measured field is absent, so
+    # the old bbox/watertight/volume/shells path is never broken.
+
+    if "shells" in spec and meas.get("n_shells") is not None:
+        # exact connected-body count (vs max_shells which is an upper bound)
+        add("shells", meas["n_shells"] == spec["shells"],
+            {"n_shells": meas["n_shells"], "expected": spec["shells"]})
+
+    if "through_holes" in spec and meas.get("through_holes") is not None:
+        add("through_holes", meas["through_holes"] == spec["through_holes"],
+            {"through_holes": meas["through_holes"], "expected": spec["through_holes"]})
+
+    if "genus" in spec and meas.get("genus") is not None:
+        add("genus", meas["genus"] == spec["genus"],
+            {"genus": meas["genus"], "expected": spec["genus"]})
+
+    if "min_solidity" in spec and meas.get("solidity") is not None:
+        add("min_solidity", meas["solidity"] >= spec["min_solidity"],
+            {"solidity": meas["solidity"], "min": spec["min_solidity"]})
+
+    if "max_solidity" in spec and meas.get("solidity") is not None:
+        add("max_solidity", meas["solidity"] <= spec["max_solidity"],
+            {"solidity": meas["solidity"], "max": spec["max_solidity"]})
+
     return checks
 
 

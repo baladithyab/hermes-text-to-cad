@@ -96,6 +96,25 @@ def plugin():
     return load_plugin_module()
 
 
+def load_measure_module():
+    """Load scripts/measure.py as a module.
+
+    measure.py imports trimesh *inside* measure() (not at module top), so the
+    module loads — and its pure gate() function is testable — without the CAD
+    stack present. measure() itself only runs under the CAD venv.
+    """
+    measure_path = REPO_ROOT / "scripts" / "measure.py"
+    spec = importlib.util.spec_from_file_location("cad_measure_script", measure_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def measure_mod():
+    return load_measure_module()
+
+
 @pytest.fixture
 def fixtures_dir():
     return FIXTURES

@@ -9,7 +9,7 @@ kind: standalone
 platforms: [linux, macos, windows]
 
 # Tools wired in register(ctx). The register() calls are authoritative.
-provides_tools: [cad_generate, cad_render, cad_measure, cad_review]
+provides_tools: [cad_spec_from_prompt, cad_generate, cad_render, cad_measure, cad_review]
 hooks: []
 
 # Deliberately EMPTY — do not prompt for env vars at install (hostile-UX trap).

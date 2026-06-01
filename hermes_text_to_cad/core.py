@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +34,110 @@ def cad_venv_python() -> str:
     if override:
         return override
     return str(DEFAULT_VENV / "bin" / "python")
+
+
+# ---- prompt-derived geometric spec (CADTests pattern) -----------------------
+# Turn an NL prompt into a machine-checkable spec the numeric gate can evaluate.
+# Deterministic on purpose: an LLM can emit the same JSON shape, but the
+# *contract* is unit-testable offline and never blocks on a network/key. This is
+# the executable-assertion idea from CADTests — geometric tests, not vision.
+
+# "40x30x20", "40 x 30 x 20", "40mm x 30 mm x 20mm", "40 by 30 by 8"
+_BBOX_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:mm)?\s*(?:x|×|by)\s*"
+    r"(\d+(?:\.\d+)?)\s*(?:mm)?\s*(?:x|×|by)\s*"
+    r"(\d+(?:\.\d+)?)\s*(?:mm)?",
+    re.IGNORECASE,
+)
+
+# number-words 0..12 for "three holes" style counts
+_NUM_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12,
+}
+
+# "through hole", "through-hole", "thru hole", "mounting hole(s)", "bore" — all
+# imply a hole that passes through the body (adds genus). "blind hole" does NOT.
+_THROUGH_HOLE_RE = re.compile(
+    r"\b(?:(\d+)|([a-z]+))?[\s-]*"
+    r"(?:through|thru|mounting|clearance)?[\s-]*(?:through[\s-]*)?"
+    r"(?:hole|bore|bolt[\s-]*hole)s?\b",
+    re.IGNORECASE,
+)
+_BLIND_RE = re.compile(r"\bblind\s+(?:hole|bore)s?\b", re.IGNORECASE)
+_ASSEMBLY_RE = re.compile(
+    r"\b(?:assembly|two[\s-]*part|multi[\s-]*part|snap[\s-]*fit|"
+    r"(\d+)[\s-]*(?:part|piece)s?)\b",
+    re.IGNORECASE,
+)
+
+DEFAULT_TOL_MM = 0.5
+
+
+def derive_spec(prompt: str) -> dict[str, Any]:
+    """Deterministically extract a machine-checkable spec from an NL prompt.
+
+    Returns a dict consumable by measure.py's gate(). Keys are only included
+    when the prompt warrants them (so the gate evaluates only what was asked):
+      bbox_mm, tol_mm           — overall dimensions (sorted-compared, ± tol)
+      through_holes             — count of holes that pass through the body
+      watertight                — default True (printable/manifold)
+      max_shells / shells       — connected-body count
+      prompt                    — echoed for traceability/vision-gate context
+    """
+    text = prompt.strip()
+    low = text.lower()
+    spec: dict[str, Any] = {"prompt": text, "watertight": True, "tol_mm": DEFAULT_TOL_MM}
+
+    m = _BBOX_RE.search(text)
+    if m:
+        spec["bbox_mm"] = [float(m.group(1)), float(m.group(2)), float(m.group(3))]
+
+    # Through-holes: count blind holes out, then look for a through/mounting hole
+    # phrase with an optional leading count ("4 mounting holes", "three through-holes").
+    if not _BLIND_RE.search(low):
+        hm = _THROUGH_HOLE_RE.search(low)
+        if hm:
+            num, word = hm.group(1), hm.group(2)
+            count = None
+            if num:
+                count = int(num)
+            elif word and word in _NUM_WORDS:
+                count = _NUM_WORDS[word]
+            elif word is None:
+                count = 1  # "...with a hole" / bare "hole"
+            # a bare matched word that isn't a number-word (e.g. "drilled hole")
+            # still means at least one hole.
+            if count is None:
+                count = 1
+            spec["through_holes"] = count
+
+    # Multi-body intent relaxes the single-shell default.
+    am = _ASSEMBLY_RE.search(low)
+    if am:
+        n = int(am.group(1)) if am.group(1) else 2
+        spec["max_shells"] = max(2, n)
+    else:
+        spec["max_shells"] = 1
+
+    return spec
+
+
+def spec_from_prompt(prompt: str, out_path: str | None = None) -> dict[str, Any]:
+    """Tool-facing wrapper around derive_spec.
+
+    Returns {success, spec, spec_path?}. If out_path is given, the spec JSON is
+    written there so it can be fed straight to cad_measure --spec.
+    """
+    spec = derive_spec(prompt)
+    written = None
+    if out_path:
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(spec, indent=2) + "\n")
+        written = str(p)
+    return {"success": True, "spec": spec, "spec_path": written}
 
 
 def _run(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:

@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # Hermes dispatch calls handlers as handler(args: dict, **kwargs) and JSON-encodes
 # the returned dict. So each handler unpacks from the args dict.
 
+def _cad_spec_from_prompt(args: dict, **_kw: Any) -> dict[str, Any]:
+    return core.spec_from_prompt(prompt=args["prompt"], out_path=args.get("out_path"))
+
+
 def _cad_generate(args: dict, **_kw: Any) -> dict[str, Any]:
     return core.generate(code=args["code"], out_dir=args.get("out_dir"), stem=args.get("stem", "part"))
 
@@ -63,6 +67,30 @@ def _setup_cli(parser) -> None:
 # ---- register -------------------------------------------------------------
 
 def register(ctx: Any) -> None:
+    ctx.register_tool(
+        name="cad_spec_from_prompt",
+        toolset="cad",
+        handler=_cad_spec_from_prompt,
+        description=("Derive a machine-checkable geometric spec from a natural-language part "
+                     "prompt (the CADTests pattern): bounding box, through-hole count, "
+                     "connected-body count, watertight. Deterministic — no model call. Feed "
+                     "the resulting spec.json straight to cad_measure --spec so the numeric "
+                     "gate asserts INTENT (e.g. 'has a through-hole'), not just bbox. Step 1 "
+                     "of the closed CAD loop."),
+        emoji="📝",
+        schema={
+            "name": "cad_spec_from_prompt",
+            "description": "NL prompt -> machine-checkable geometric spec (bbox/holes/shells).",
+            "parameters": {
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                    "prompt": {"type": "string", "description": "Natural-language description of the part."},
+                    "out_path": {"type": "string", "description": "Optional path to write spec.json (for cad_measure --spec)."},
+                },
+            },
+        },
+    )
     ctx.register_tool(
         name="cad_generate",
         toolset="cad",

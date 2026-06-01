@@ -11,19 +11,28 @@ A model is only "done" when **both** gates pass. This is the architecture the 20
 ## The loop
 
 ```
-spec → generate (CadQuery) → render (3-view PNG) →
-  ├─ numeric gate (trimesh): bbox / watertight / volume / shells  vs spec
+prompt → derive spec (NL → machine-checkable assertions) →
+  generate (CadQuery) → render (3-view PNG) →
+  ├─ numeric gate (trimesh): bbox / watertight / volume / shells
+  │                          + through-holes (genus) / solidity  vs spec
   └─ vision gate (Gemini + Opus + GPT, cross-family): intent match
 → iterate on convergent findings → repeat (hard cap, keep best-so-far)
 ```
+
+The numeric gate is **prompt-derived** (the CADTests finding: executable
+geometric tests beat vision-only feedback). `cad_spec_from_prompt` turns
+*"a 40×30×20 block with a through-hole"* into assertions including
+`through_holes == 1` — so a solid block with the right bounding box but **no
+hole** fails the gate, a case a bbox-only check silently passes.
 
 ## Tools
 
 | Tool | Step | What it does |
 |------|------|--------------|
+| `cad_spec_from_prompt` | 1 | Derive a machine-checkable geometric spec (bbox / through-holes / shells) from an NL prompt — deterministic, no model call |
 | `cad_generate` | 2 | Run CadQuery code → export STL (mesh) + STEP (manufacturing B-rep) |
 | `cad_render`   | 3 | Headless 3-view montage PNG (VTK, matplotlib fallback) |
-| `cad_measure`  | 4 | Numeric gate: measure + assert vs spec.json (`gate_pass` bool) |
+| `cad_measure`  | 4 | Numeric gate: measure + assert vs spec.json (`gate_pass` bool); now includes through-hole (genus) & solidity checks |
 | `cad_review`   | 5 | Cross-family vision gate (needs `OPENROUTER_API_KEY`) |
 
 Plus a `hermes cad` CLI: `cad doctor` (readiness) and `cad setup` (provision the CAD venv).
