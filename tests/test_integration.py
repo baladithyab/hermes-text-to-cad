@@ -278,3 +278,41 @@ def test_legit_cadquery_blob_runs_through_ast_check(tmp_path):
     assert res["success"] is True, res.get("stderr")
     assert res.get("rejected") in (None, False)
     assert Path(res["stl"]).exists()
+
+
+# ---- SECURITY (b): bubblewrap sandbox, end-to-end ----------------------------
+
+def test_sandbox_blocks_network_and_masks_secrets(tmp_path, monkeypatch):
+    """ADR-0002 end-to-end: with HERMES_CAD_SANDBOX=1 and bwrap present, generated
+    code runs with NO network and secret dirs (~/.hermes etc.) masked, yet still
+    builds the STL. Skips cleanly if no sandbox tool is installed.
+
+    We DISABLE the AST check here (HERMES_CAD_NO_AST_CHECK=1) on purpose so the
+    generated probe may `import socket` — we are testing the OS sandbox layer,
+    not the AST layer, and want to prove the sandbox blocks the *runtime*
+    network call even when the static check is bypassed.
+    """
+    if not core.sandbox_info()["available"]:
+        pytest.skip("no sandbox tool (bwrap/firejail) installed")
+    monkeypatch.setenv("HERMES_CAD_SANDBOX", "1")
+    monkeypatch.setenv("HERMES_CAD_NO_AST_CHECK", "1")
+
+    PROBE = (
+        "import os, json, socket, cadquery as cq\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        "report = {}\n"
+        "try:\n"
+        "    socket.create_connection(('1.1.1.1', 80), 2); report['net'] = 'reachable'\n"
+        "except Exception as e:\n"
+        "    report['net'] = 'blocked:' + type(e).__name__\n"
+        "report['hermes_env_readable'] = os.path.exists(os.path.expanduser('~/.hermes/.env'))\n"
+        "open(os.path.join(OUT, 'probe.json'), 'w').write(json.dumps(report))\n"
+        "cq.exporters.export(cq.Workplane('XY').box(10,10,10), os.path.join(OUT,'part.stl'))\n"
+    )
+    res = core.generate(code=PROBE, out_dir=str(tmp_path), stem="part")
+    assert res["sandbox"] == "bwrap", res
+    assert res["success"] is True, res.get("stderr")
+
+    report = json.loads((tmp_path / "probe.json").read_text())
+    assert report["net"].startswith("blocked:"), f"network NOT blocked: {report['net']}"
+    assert report["hermes_env_readable"] is False, "~/.hermes/.env was readable in sandbox!"

@@ -85,6 +85,73 @@ def cad_venv_python() -> str:
     return str(DEFAULT_VENV / "bin" / "python")
 
 
+# ---- opt-in OS sandbox for generated code (ADR-0002) ------------------------
+# When HERMES_CAD_SANDBOX=1, wrap the generate subprocess in bubblewrap (no
+# network, read-only filesystem except CAD_OUT, secret dirs masked with tmpfs).
+# firejail is the fallback. Opt-in: absent the flag, generate runs unsandboxed
+# (the default trusted-use case). When the flag is set but no sandbox binary
+# exists, we WARN and run unsandboxed (degrade, not fail) — a conscious choice
+# documented in ADR-0002, surfaced as sandbox="requested-unavailable".
+
+# Home-relative dirs to mask inside the sandbox so generated code can't read
+# secrets/keys even though the root is bind-mounted read-only. Masked via tmpfs
+# at the RESOLVED realpath (a symlinked ~/.aws -> /mnt/c/... still gets masked).
+_SECRET_DIRS = (".hermes", ".ssh", ".aws", ".gnupg", ".config/gcloud",
+                ".kube", ".docker", ".netrc")
+
+
+def sandbox_info() -> dict[str, Any]:
+    """Detect an available sandbox tool. Prefers bwrap, falls back to firejail."""
+    for tool in ("bwrap", "firejail"):
+        path = shutil.which(tool)
+        if path:
+            return {"available": True, "tool": tool, "bin": path}
+    return {"available": False, "tool": None, "bin": None}
+
+
+def _wrap_sandbox(inner_argv: list[str], out_dir: str) -> list[str]:
+    """Wrap inner_argv in a sandbox command (bwrap preferred, firejail fallback).
+
+    bwrap policy (verified 2026-05-31): --unshare-net (no network), --ro-bind / /
+    (read-only root, which transparently covers the uv-managed interpreter that
+    lives outside ~/.venvs), a writable --bind of CAD_OUT, and a tmpfs mask over
+    each EXISTING secret dir's realpath. Returns the original argv unchanged-ish
+    if no sandbox is available (caller checks sandbox_info first).
+    """
+    info = sandbox_info()
+    if not info["available"]:
+        return list(inner_argv)
+    home = os.path.expanduser("~")
+    if info["tool"] == "bwrap":
+        argv = [
+            info["bin"],
+            "--unshare-net", "--unshare-pid", "--die-with-parent", "--new-session",
+            "--ro-bind", "/", "/",
+            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+        ]
+        # mask secret dirs (only those whose realpath is an existing dir — bwrap
+        # errors on a tmpfs target that doesn't exist in the new root)
+        seen: set[str] = set()
+        for d in _SECRET_DIRS:
+            rp = os.path.realpath(os.path.join(home, d))
+            if rp not in seen and os.path.isdir(rp):
+                argv += ["--tmpfs", rp]
+                seen.add(rp)
+        argv += [
+            "--bind", out_dir, out_dir,
+            "--chdir", out_dir,
+        ]
+        argv += list(inner_argv)
+        return argv
+    # firejail fallback
+    argv = [
+        info["bin"], "--quiet", "--net=none", "--private-tmp",
+        f"--whitelist={out_dir}",
+    ]
+    argv += list(inner_argv)
+    return argv
+
+
 # ---- prompt-derived geometric spec (CADTests pattern) -----------------------
 # Turn an NL prompt into a machine-checkable spec the numeric gate can evaluate.
 # Deterministic on purpose: an LLM can emit the same JSON shape, but the
@@ -406,14 +473,35 @@ def generate(code: str, out_dir: str | None = None, stem: str = "part") -> dict[
     # runs MODEL-AUTHORED code, so it must never see OPENROUTER_API_KEY or any
     # other parent secret. CAD_OUT is the one var we inject.
     env = _scrubbed_env({"CAD_OUT": str(out)})
+
+    # Opt-in OS sandbox (ADR-0002). Off by default (trusted use). When
+    # HERMES_CAD_SANDBOX=1, wrap in bwrap/firejail; if requested but no tool is
+    # available, WARN and run unsandboxed (degrade, not fail).
+    inner = [py, str(script)]
+    sandbox_state = "off"
+    argv = inner
+    if os.environ.get("HERMES_CAD_SANDBOX"):
+        info = sandbox_info()
+        if info["available"]:
+            argv = _wrap_sandbox(inner, out_dir=str(out))
+            sandbox_state = info["tool"]
+        else:
+            logger.warning(
+                "HERMES_CAD_SANDBOX=1 set but no sandbox tool (bwrap/firejail) "
+                "found — running generated code UNSANDBOXED. Install bubblewrap "
+                "for OS-level confinement of untrusted code."
+            )
+            sandbox_state = "requested-unavailable"
+
     # cwd=out so scripts that export with bare local names still land in CAD_OUT.
-    r = subprocess.run([py, str(script)], capture_output=True, text=True,
+    r = subprocess.run(argv, capture_output=True, text=True,
                        timeout=300, env=env, cwd=str(out))
     stl = out / f"{stem}.stl"
     step = out / f"{stem}.step"
     stl_ok = stl.exists() and stl.stat().st_size > 0
     return {
         "success": r.returncode == 0 and stl_ok,
+        "sandbox": sandbox_state,
         "out_dir": str(out),
         "stl": str(stl) if stl_ok else None,
         "step": str(step) if (step.exists() and step.stat().st_size > 0) else None,
@@ -486,6 +574,17 @@ def doctor() -> dict[str, Any]:
 
     scripts_ok = all((SCRIPTS / s).exists() for s in ("render.py", "measure.py", "scatter_review.py"))
     checks.append({"check": "scripts_present", "pass": scripts_ok, "detail": str(SCRIPTS)})
+
+    # Sandbox availability (ADR-0002). Not required for readiness — generated
+    # code runs unsandboxed by default — but reported so operators know whether
+    # HERMES_CAD_SANDBOX=1 will actually confine untrusted code.
+    sb = sandbox_info()
+    checks.append({"check": "sandbox_available", "pass": sb["available"],
+                   "detail": (f"{sb['tool']} ({sb['bin']}) — set HERMES_CAD_SANDBOX=1 to confine "
+                              "generated code"
+                              if sb["available"]
+                              else "OPTIONAL: install bubblewrap (bwrap) or firejail to sandbox "
+                                   "untrusted generated code (HERMES_CAD_SANDBOX=1)")})
 
     # numeric gate works without display or key; vision gate needs key.
     core_ok = venv_ok and libs_ok and scripts_ok

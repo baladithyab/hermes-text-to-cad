@@ -285,7 +285,7 @@ def test_doctor_shape_when_venv_ready(tmp_path, monkeypatch):
     names = [c["check"] for c in rep["checks"]]
     assert names == [
         "cad_venv_exists", "cad_libs_import", "render_display",
-        "vision_gate_key", "scripts_present",
+        "vision_gate_key", "scripts_present", "sandbox_available",
     ]
     for c in rep["checks"]:
         assert set(c.keys()) == {"check", "pass", "detail"}
@@ -341,6 +341,39 @@ def test_doctor_not_ready_when_a_script_missing(tmp_path, monkeypatch):
     assert by_name["cad_libs_import"]["pass"] is True
     assert by_name["scripts_present"]["pass"] is False
     assert rep["ready"] is False
+
+
+# ---- doctor: sandbox check ----------------------------------------------------
+
+def test_doctor_reports_sandbox_available(tmp_path, monkeypatch):
+    fake_py = tmp_path / "bin" / "python"
+    fake_py.parent.mkdir(parents=True)
+    fake_py.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("HERMES_CAD_PYTHON", str(fake_py))
+    monkeypatch.setattr(core, "venv_ready", lambda: True)
+    monkeypatch.setattr(core, "_has_openrouter_key", lambda: True)
+    monkeypatch.setattr(core.shutil, "which",
+                        lambda b: "/usr/bin/bwrap" if b == "bwrap" else None)
+    rep = core.doctor()
+    by = {c["check"]: c for c in rep["checks"]}
+    assert by["sandbox_available"]["pass"] is True
+    assert "bwrap" in by["sandbox_available"]["detail"]
+
+
+def test_doctor_sandbox_absent_does_not_block_ready(tmp_path, monkeypatch):
+    # No sandbox tool: sandbox check fails but core readiness is unaffected
+    # (generated code runs unsandboxed by default).
+    fake_py = tmp_path / "bin" / "python"
+    fake_py.parent.mkdir(parents=True)
+    fake_py.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("HERMES_CAD_PYTHON", str(fake_py))
+    monkeypatch.setattr(core, "venv_ready", lambda: True)
+    monkeypatch.setattr(core, "_has_openrouter_key", lambda: True)
+    monkeypatch.setattr(core.shutil, "which", lambda b: None)
+    rep = core.doctor()
+    by = {c["check"]: c for c in rep["checks"]}
+    assert by["sandbox_available"]["pass"] is False
+    assert rep["ready"] is True   # sandbox absence does NOT block readiness
 
 
 # ---- _has_openrouter_key ------------------------------------------------------
