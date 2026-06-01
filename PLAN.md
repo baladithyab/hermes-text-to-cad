@@ -1,0 +1,125 @@
+# hermes-text-to-cad — Implementation Plan & Backlog
+
+> This document is the executable backlog. It is written to be handed to an autonomous coding agent (Claude Code / Codex) for implementation. Every item has: rationale, research grounding, concrete steps, acceptance criteria, and rollback notes. Work the waves in order; items within a wave are independent and parallelizable.
+
+## Context (read first)
+
+`hermes-text-to-cad` is a Hermes Agent plugin that does **verified** text-to-CAD via a closed loop with two accept gates (numeric + vision). v0.1.0 ships a functional core: `cad_generate` / `cad_render` / `cad_measure` / `cad_review` tools, a `hermes cad` CLI (`setup`/`doctor`), proven scripts in `scripts/`, and a dedicated CAD venv at `~/.venvs/cad` invoked as a subprocess (keeps the heavy CAD stack out of the Hermes venv).
+
+**Architecture is validated by the literature** — see `references/` and the SOTA note. The field's key finding (CADTests, arXiv 2605.07807): *test-based geometric feedback OUTPERFORMS vision-only feedback*. So the highest-ROI work is making the numeric gate richer and **prompt-derived**, not piling on more vision.
+
+**Repo layout:**
+```
+plugin.yaml              manifest
+__init__.py              register(ctx) — 4 tools + `cad` CLI
+hermes_text_to_cad/
+  __init__.py
+  core.py                loop engine (generate/render/measure/review/doctor/setup)
+scripts/                 render.py, measure.py, scatter_review.py  (run in CAD venv)
+references/              cadquery + openscad cheatsheets, review-rubric, phase0-spike
+templates/               part.py (CadQuery), part.scad (OpenSCAD)
+tests/                   (to be built — see Wave 0)
+```
+
+**Hard rules for the implementing agent:**
+- The CAD stack (cadquery/vtk/trimesh) runs ONLY in `~/.venvs/cad` via subprocess. Never `import cadquery` from the Hermes-venv plugin code.
+- Tool handlers return dicts (loader JSON-encodes). Async handlers must be awaited by dispatch — add a test if any handler becomes async.
+- `requires_env: []` stays empty (the install-prompt hostile-UX trap). Surface optional creds at `cad doctor` time.
+- Use lazy log formatting (`logger.info("x %s", v)`), never f-strings in logs.
+- Run the pre-push smoke test (below) before every commit.
+
+---
+
+## Wave 0 — Test harness & CI (do FIRST, everything depends on it)
+
+**0.1 — Plugin-contract tests.** `tests/test_plugin_contract.py`: manifest parses, `register()` against a mock ctx wires exactly the 4 tools + `cad` CLI, every tool schema is valid JSON-schema. (Adapt the smoke test in the README/plugin-authoring ref.)
+- *Accept:* `pytest tests/test_plugin_contract.py` green.
+
+**0.2 — Core unit tests (mocked subprocess).** `tests/test_core.py`: mock `subprocess.run` and assert `generate/render/measure/review` build the right argv, parse stdout correctly, and surface `gate_pass` from exit codes (0=pass, 1=fail, both `success`). Test `doctor()` check shapes and `_has_openrouter_key` env+dotenv parsing.
+- *Accept:* green; no real CAD venv needed (all subprocess mocked).
+
+**0.3 — Integration test (gated on venv).** `tests/test_integration.py` marked `@pytest.mark.skipif(not venv_ready())`: real generate→render→measure on a fixture bracket; assert bbox within tol and `gate_pass`.
+- *Accept:* green when `~/.venvs/cad` exists; skipped cleanly otherwise.
+
+**0.4 — CI workflow.** `.github/workflows/ci.yml`: matrix py3.10–3.12, `pip install -e '.[dev]'` (catches the packages-list drift), run contract+core tests (integration skipped in CI unless a CAD venv is cached). Add a job that runs the pre-push smoke test.
+- *Accept:* CI green on push.
+
+---
+
+## Wave 1 — The highest-ROI research findings (HIGH)
+
+**1.1 — Prompt-derived geometric tests (CADTests pattern). ★ TOP PRIORITY ★**
+Research: CADTests (arXiv 2605.07807) shows executable per-prompt geometric assertions beat vision feedback. Today `cad_measure` checks a hand-written fixed spec.
+- Build a `cad_spec_from_prompt` tool (or a `core.derive_spec(prompt)` step) that turns an NL prompt into a structured, machine-checkable spec: dimensional assertions (`hole_d == 8 ± 0.1`), topological (`through_holes == 1`, `is_watertight`), feature counts (`barb_count == 3`), bbox, wall-thickness mins. Extend `measure.py`'s gate vocabulary to evaluate them (it already does bbox/watertight/volume/shells — add: feature-count via trimesh, wall-thickness sampling, hole-diameter detection where feasible).
+- *Accept:* given a prompt + model, the derived spec catches a deliberately-wrong dimension that the old bbox-only gate missed; unit test with a fixture prompt+STL pair.
+- *Rollback:* the richer gate is additive; old fixed-spec path still works.
+
+**1.2 — ReAct error-feedback loop.** When CadQuery raises (bad fillet radius, kernel error, non-manifold), capture the traceback and feed it back as a structured observation for the next `cad_generate` iteration. Add `core.generate` already returns `stderr`; build a thin `core.iterate(prompt, history, last_error)` contract and document the loop in SKILL/README so the agent retries with the error in context.
+- *Accept:* a part that fails on first generate (e.g. fillet radius too large) gets auto-corrected within the iteration cap in an integration test.
+
+---
+
+## Wave 2 — Verification depth (MED)
+
+**2.1 — Structured-Q&A vision gate (CADCodeVerify pattern).** Upgrade `scatter_review.py` from free-form critique to: VLM generates 2–5 Yes/No questions derived from the spec → answers each against the render with chain-of-thought → failures become the `must_fix` list. Keep cross-family (our edge over the single-model papers). Preserve the existing free-form mode behind a flag.
+- *Accept:* on a part with a known intent error (e.g. hole on wrong face), ≥2/3 reviewers' Q&A flags it; structured output parses to `{questions, answers, must_fix}`.
+
+**2.2 — Chamfer-Distance similarity scoring.** For "make it like THIS" tasks where the user supplies a reference STL/STEP, add a `cad_compare` tool computing Chamfer Distance (trimesh sampling) between generated and reference meshes — straight from CAD-Coder's geometric reward. Not applicable to pure-text gen (no GT); document that.
+- *Accept:* CD≈0 for identical meshes, grows monotonically with deformation; unit test.
+
+**2.3 — Explicit CoT plan step.** Add an optional `cad_plan` tool / loop step that emits a structured modeling plan (primitives → operations → features → export) before codegen. CAD-Coder shows CoT measurably helps validity.
+- *Accept:* plan is structured JSON; integration test shows codegen consuming it.
+
+---
+
+## Wave 3 — Portability & coverage (MED/LOW)
+
+**3.1 — Headless-portable rendering (OSMesa VTK).** Today the render gate needs a display (WSLg `:0` here; matplotlib fallback elsewhere). Add an OSMesa/EGL software-GL path so VTK renders with real occlusion on a headless server with no display. Detect and prefer in `render.py`; document in `cad doctor`.
+- *Accept:* on a box with no `DISPLAY` and no WSLg socket, `cad_render` still produces a z-buffered VTK montage (not the matplotlib fallback).
+
+**3.2 — Section/cutaway renders for internal features.** When the spec mentions internal channels/bores, add a clipping-plane render (VTK supports it) so hidden features are visible to the vision gate.
+- *Accept:* a part with an internal channel shows the channel in a section view; vision gate can assess it.
+
+**3.3 — OpenSCAD backend path.** Wire the optional OpenSCAD backend (AppImage `--appimage-extract` for no-root installs) for CSG-style authoring + CADAM-style parameter sliders. `templates/part.scad` exists.
+- *Accept:* `cad_generate` with `backend="openscad"` produces an STL via the openscad binary; `cad doctor` reports openscad availability.
+
+**3.4 — Zoo/KCL organic fallback.** For freeform surfaces CadQuery/OpenSCAD choke on, add a Zoo cloud path gated on `ZOO_API_TOKEN` (surfaced at doctor-time, not install-time).
+- *Accept:* with a token set, an organic-surface prompt routes to Zoo and returns a mesh; gracefully degrades with a clear message when unset.
+
+---
+
+## Wave 4 — Polish & release (LOW)
+
+**4.1 — `cad quickstart` + `cad repair` CLI** (activation/diagnostics pattern): prescriptive checklist + idempotent local fixes (re-provision venv, etc.). Never self-restart the gateway from inside.
+
+**4.2 — Failure-mode guards** from the literature: Chamfer-reward exploitation in thin walls (add wall-thickness assertions to the gate vocabulary — ties to 1.1), extrusion-vs-cut confusion (volume-sign sanity), multi-part alignment (feature-placement assertions).
+
+**4.3 — Examples gallery.** `examples/` with 5–8 worked parts (bracket, enclosure w/ lid, gear, hose-barb, mounting plate) each with prompt + code + spec + expected gate output. Doubles as integration fixtures.
+
+**4.4 — Docs site / GIF.** A short demo of the loop catching and fixing a bad part.
+
+---
+
+## Pre-push smoke test (run before EVERY commit)
+
+```bash
+cd <repo>
+# 1. deps install cleanly (catches packages-list drift)
+~/.hermes/hermes-agent/venv/bin/python3 -m pip install -e '.[dev]' 2>&1 | tail -5
+# 2. plugin contract
+python3 -c "import yaml,importlib.util,sys; from pathlib import Path; \
+m=yaml.safe_load(open('plugin.yaml')); assert m['name']=='hermes-text-to-cad'; \
+sys.path.insert(0,'.'); s=importlib.util.spec_from_file_location('p','__init__.py'); \
+mod=importlib.util.module_from_spec(s); s.loader.exec_module(mod); \
+print('register ok' if callable(mod.register) else 'FAIL')"
+# 3. tests
+pytest tests/ -q
+```
+
+## Definition of done (whole backlog)
+
+- All waves' acceptance criteria met and tested.
+- `hermes cad doctor` green on a fresh install (numeric path) and vision-green with a key.
+- README install flow verified end-to-end on a clean machine.
+- CI green. Tagged release v0.2.0 (waves 1–2) / v0.3.0 (wave 3) / v1.0.0 (wave 4).
+- No item deferred without a one-line justification in this doc.

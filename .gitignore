@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+# CAD build artifacts
+*.stl
+*.step
+*.stp
+*_montage.png
+*_front.png
+*_top.png
+*_iso.png
+v2_*.png
+vtk_*.png
+out/
+.DS_Store

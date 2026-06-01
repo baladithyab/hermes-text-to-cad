@@ -1,0 +1,18 @@
+name: hermes-text-to-cad
+version: 0.1.0
+manifest_version: 1
+description: "Verified text-to-CAD: generate parametric 3D models (CadQuery/OpenSCAD) with a closed loop — render, numeric gate (dims/watertight), and multi-model vision gate."
+author: "baladithyab"
+license: MIT
+homepage: https://github.com/baladithyab/hermes-text-to-cad
+kind: standalone
+platforms: [linux, macos, windows]
+
+# Tools wired in register(ctx). The register() calls are authoritative.
+provides_tools: [cad_generate, cad_render, cad_measure, cad_review]
+hooks: []
+
+# Deliberately EMPTY — do not prompt for env vars at install (hostile-UX trap).
+# The vision gate's OPENROUTER_API_KEY is surfaced at `cad doctor` time instead,
+# and is optional (numeric gate works without it).
+requires_env: []
