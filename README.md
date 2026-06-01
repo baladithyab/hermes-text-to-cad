@@ -86,6 +86,25 @@ hermes cad doctor
 
 The plugin itself imports nothing heavy into the Hermes venv — the CAD stack lives in `~/.venvs/cad` and is invoked as a subprocess. Override the interpreter with `HERMES_CAD_PYTHON`.
 
+## ⚠️ Security: `cad_generate` executes model-authored Python
+
+`cad_generate` runs **arbitrary, LLM-authored Python** in a subprocess — that is
+how it builds the model. Treat generated code as untrusted input. Three defense
+layers ship by default-or-opt-in (full detail in [`SECURITY.md`](SECURITY.md)):
+
+1. **AST denylist** (always on) — rejects obvious exfil/abuse (`import socket`,
+   `os.system`, `eval`, file writes outside the output dir) *before* execution.
+2. **Scrubbed env** (always on) — the subprocess gets a minimal allowlisted
+   environment; `OPENROUTER_API_KEY` and all secrets are dropped, so generated
+   code can never read them from `os.environ`.
+3. **Opt-in OS sandbox** — set **`HERMES_CAD_SANDBOX=1`** to confine generated
+   code with bubblewrap (no network, read-only filesystem except the output dir,
+   secret dirs masked). firejail is the fallback.
+
+> **For untrusted use, run with `HERMES_CAD_SANDBOX=1`.** `hermes cad doctor`
+> reports whether a sandbox tool (`bwrap`/`firejail`) is installed. Without one,
+> the flag warns and runs unsandboxed (it degrades, it does not fail).
+
 ## Requirements
 
 - **CadQuery** (primary backend) installs without root and exports STEP + real fillets/shells.
