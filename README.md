@@ -108,7 +108,7 @@ layers ship by default-or-opt-in (full detail in [`SECURITY.md`](SECURITY.md)):
 ## Requirements
 
 - **CadQuery** (primary backend) installs without root and exports STEP + real fillets/shells.
-- **Render gate** needs a display for best quality. On WSL, WSLg provides one at `:0` automatically. Headless servers fall back to matplotlib (lower fidelity) or need an OSMesa VTK build (see roadmap).
+- **Render gate** picks a backend by precedence (see [ADR-0004](docs/adr/0004-headless-render-precedence.md)): an existing `DISPLAY` (WSLg `:0` / real X) → an OSMesa/EGL VTK build → an auto-launched private `Xvfb` (software GLX) → matplotlib Agg (last resort). The stock pip `vtk` wheel is X11-only and would *hard-abort* with no display, so `render.py` first probes GL in a disposable child process and only renders in-process once a context is confirmed — a headless box never crashes the render step. `hermes cad doctor`'s `render_headless_gl` check reports which path is live. For real z-buffered VTK on a headless server, install an OSMesa VTK build into the CAD venv or ensure `Xvfb` is on `PATH`.
 - **Vision gate** needs `OPENROUTER_API_KEY` in `~/.hermes/.env`. Optional — the numeric gate works without it.
 
 ## Backends

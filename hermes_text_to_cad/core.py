@@ -614,14 +614,71 @@ def generate(code: str, out_dir: str | None = None, stem: str = "part") -> dict[
     }
 
 
-def render(stl: str) -> dict[str, Any]:
+def _parse_backend(stderr: str) -> str:
+    """Lift `backend=<name>` from render.py's stderr (vtk / vtk-osmesa / matplotlib)."""
+    import re as _re
+    m = _re.search(r"backend=([\w-]+)", stderr)
+    return m.group(1) if m else "?"
+
+
+def _osmesa_capable() -> bool:
+    """Ask the CAD venv whether its VTK has an OSMesa/EGL offscreen render window
+    class (a software-GL build that renders headless with no display)."""
     py = cad_venv_python()
-    r = _run([py, str(SCRIPTS / "render.py"), stl], timeout=180)
+    if not Path(py).exists():
+        return False
+    probe = ("import vtk,sys; "
+             "sys.exit(0 if any(hasattr(vtk,c) for c in "
+             "('vtkOSOpenGLRenderWindow','vtkEGLRenderWindow')) else 1)")
+    try:
+        r = _run([py, "-c", probe], timeout=60)
+        return r.returncode == 0
+    except Exception:
+        logger.warning("headless GL: osmesa capability probe failed", exc_info=True)
+        return False
+
+
+def headless_gl_info(libs_ok: bool = True) -> dict[str, Any]:
+    """Report which headless render path is available (ADR-0004), for cad doctor.
+
+    path is one of: 'display' (an X display is set/WSLg), 'osmesa' (VTK has a
+    software-GL window), 'xvfb' (Xvfb present + /tmp/.X11-unix writable), or
+    'matplotlib-only' (no real-GL path — renders work but at lower fidelity).
+    """
+    display = os.environ.get("DISPLAY") or (":0" if Path("/tmp/.X11-unix/X0").exists() else None)
+    if display:
+        return {"path": "display", "detail": f"X display ({display}) — VTK GLX"}
+    if libs_ok and _osmesa_capable():
+        return {"path": "osmesa", "detail": "VTK has OSMesa/EGL offscreen GL (no display needed)"}
+    x11 = Path("/tmp/.X11-unix")
+    xvfb = shutil.which("Xvfb")
+    x11_writable = x11.is_dir() and os.access(str(x11), os.W_OK)
+    if xvfb and x11_writable:
+        return {"path": "xvfb",
+                "detail": f"Xvfb ({xvfb}) + writable /tmp/.X11-unix — software GLX on demand"}
+    detail = ("no real-GL path — renders fall back to matplotlib (lower fidelity). "
+              "Install an OSMesa VTK build or Xvfb for z-buffered VTK headless")
+    if xvfb and not x11_writable:
+        detail += " (Xvfb present but /tmp/.X11-unix not writable — e.g. WSL)"
+    return {"path": "matplotlib-only", "detail": detail}
+
+
+def render(stl: str, section: bool | str | None = None) -> dict[str, Any]:
+    """Render a 3-view montage PNG (headless). section=True adds a clipping-plane
+    cutaway view (auto axis = longest bbox edge); section='x'|'y'|'z' picks the
+    axis (ADR-0009). Backend precedence is handled in render.py (ADR-0004)."""
+    py = cad_venv_python()
+    args = [py, str(SCRIPTS / "render.py"), stl]
+    if section:
+        args.append("--section")
+        if isinstance(section, str) and section in ("x", "y", "z"):
+            args.append(section)
+    r = _run(args, timeout=180)
     montage = r.stdout.strip().splitlines()[-1].strip() if r.returncode == 0 and r.stdout.strip() else None
     return {
         "success": r.returncode == 0 and bool(montage) and Path(montage).exists(),
         "montage": montage,
-        "backend": "vtk" if "backend=vtk" in r.stderr else ("matplotlib" if "matplotlib" in r.stderr else "?"),
+        "backend": _parse_backend(r.stderr),
         "stderr": r.stderr[-1500:],
     }
 
@@ -819,6 +876,14 @@ def doctor() -> dict[str, Any]:
     display = os.environ.get("DISPLAY") or (":0" if Path("/tmp/.X11-unix/X0").exists() else None)
     checks.append({"check": "render_display", "pass": bool(display),
                    "detail": f"DISPLAY={display}" if display else "no X display — VTK falls back to matplotlib"})
+
+    # Headless GL path (ADR-0004): which strategy yields a real z-buffered VTK
+    # render when there's no display. Passing requires SOME real-GL path
+    # (display / osmesa / xvfb); matplotlib-only is a soft fail (works, lower
+    # fidelity). Not required for core readiness.
+    gl = headless_gl_info(libs_ok)
+    checks.append({"check": "render_headless_gl", "pass": gl["path"] != "matplotlib-only",
+                   "detail": gl["detail"]})
 
     has_or_key = _has_openrouter_key()
     checks.append({"check": "vision_gate_key", "pass": has_or_key,

@@ -173,7 +173,7 @@ def test_render_matplotlib_backend(tmp_path, monkeypatch):
     montage = tmp_path / "m.png"
     montage.write_bytes(b"\x89PNG")
     with patch_run(returncode=0, stdout=str(montage),
-                   stderr="VTK failed; falling back to matplotlib"):
+                   stderr="[render] GL probe failed; falling back to matplotlib\n[render] backend=matplotlib views=3"):
         res = core.render(stl=str(tmp_path / "p.stl"))
     assert res["backend"] == "matplotlib"
     assert res["success"] is True
@@ -193,6 +193,66 @@ def test_render_failure_when_montage_missing(tmp_path, monkeypatch):
     with patch_run(returncode=0, stdout=str(tmp_path / "nope.png"), stderr="backend=vtk"):
         res = core.render(stl=str(tmp_path / "p.stl"))
     assert res["success"] is False
+
+
+# ---- render: section + headless GL (Wave 3.1 / 3.2) --------------------------
+
+def test_render_passes_section_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    montage = tmp_path / "m.png"; montage.write_bytes(b"\x89PNG")
+    with patch_run(returncode=0, stdout=str(montage), stderr="backend=vtk section=z") as m:
+        core.render(stl=str(tmp_path / "p.stl"), section=True)
+    argv = m.call_args.args[0]
+    assert "--section" in argv
+
+
+def test_render_passes_section_axis(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    montage = tmp_path / "m.png"; montage.write_bytes(b"\x89PNG")
+    with patch_run(returncode=0, stdout=str(montage), stderr="backend=vtk") as m:
+        core.render(stl=str(tmp_path / "p.stl"), section="y")
+    argv = m.call_args.args[0]
+    assert argv[argv.index("--section") + 1] == "y"
+
+
+def test_render_no_section_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    montage = tmp_path / "m.png"; montage.write_bytes(b"\x89PNG")
+    with patch_run(returncode=0, stdout=str(montage), stderr="backend=vtk") as m:
+        core.render(stl=str(tmp_path / "p.stl"))
+    assert "--section" not in m.call_args.args[0]
+
+
+def test_render_parses_osmesa_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    montage = tmp_path / "m.png"; montage.write_bytes(b"\x89PNG")
+    with patch_run(returncode=0, stdout=str(montage), stderr="[render] backend=vtk-osmesa views=3"):
+        res = core.render(stl=str(tmp_path / "p.stl"))
+    assert res["backend"] == "vtk-osmesa"
+
+
+def test_headless_gl_info_reports_display(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    info = core.headless_gl_info(libs_ok=True)
+    assert info["path"] == "display"
+
+
+def test_headless_gl_info_osmesa(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(core.Path, "exists", lambda self: False)  # no WSLg X0
+    monkeypatch.setattr(core, "_osmesa_capable", lambda: True)
+    info = core.headless_gl_info(libs_ok=True)
+    assert info["path"] == "osmesa"
+
+
+def test_headless_gl_info_matplotlib_only(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(core, "_osmesa_capable", lambda: False)
+    monkeypatch.setattr(core.shutil, "which", lambda b: None)  # no Xvfb
+    # no WSLg socket: make every Path.exists() report False
+    monkeypatch.setattr(core.Path, "exists", lambda self: False)
+    info = core.headless_gl_info(libs_ok=True)
+    assert info["path"] == "matplotlib-only"
 
 
 # ---- measure ------------------------------------------------------------------
@@ -310,7 +370,8 @@ def test_doctor_shape_when_venv_ready(tmp_path, monkeypatch):
     names = [c["check"] for c in rep["checks"]]
     assert names == [
         "cad_venv_exists", "cad_libs_import", "render_display",
-        "vision_gate_key", "scripts_present", "sandbox_available",
+        "render_headless_gl", "vision_gate_key", "scripts_present",
+        "sandbox_available",
     ]
     for c in rep["checks"]:
         assert set(c.keys()) == {"check", "pass", "detail"}
