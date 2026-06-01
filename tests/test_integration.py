@@ -398,3 +398,38 @@ def test_chamfer_reports_normalized_and_directions(tmp_path):
         assert k in rep, f"compare report missing {k}"
     # symmetric CD = forward + backward
     assert rep["chamfer_distance"] == pytest.approx(rep["forward"] + rep["backward"], rel=1e-3)
+
+
+# ---- Wave 2.1: structured-Q&A vision gate, end-to-end (real network) ---------
+
+@pytest.mark.skipif(not core._has_openrouter_key(),
+                    reason="OPENROUTER_API_KEY not set — vision gate is optional")
+def test_qa_vision_gate_flags_missing_through_hole(tmp_path):
+    """ADR-0005 acceptance: a part with a KNOWN intent error (a solid block where
+    the spec demands a top-face through-hole) is flagged by >=2/3 cross-family
+    reviewers, and the structured output parses to {questions, answers, must_fix}
+    with a convergent must-fix. Real network call — skipped without a key.
+    """
+    # render the holeless solid box
+    stl = str(FIXTURES / "solid_box.stl")
+    rendered = core.render(stl=stl)
+    assert rendered["success"], rendered.get("stderr")
+
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({
+        "prompt": "a 40x30x20 mounting block with a through hole on the top face",
+        "bbox_mm": [40, 30, 20], "through_holes": 1, "watertight": True,
+    }))
+
+    res = core.review(montage=rendered["montage"], spec_path=str(spec), mode="qa")
+    assert res["success"], res.get("stderr")
+    # structured parse: every reviewer yields the QA shape
+    assert len(res["reviewers"]) >= 2
+    for rv in res["reviewers"]:
+        assert "questions" in rv and "answers" in rv and "must_fix" in rv
+
+    agg = res["aggregate"]
+    # >=2 families converge on the missing hole -> gate fails, convergent fix present
+    assert agg["gate_pass"] is False, agg
+    assert agg["convergent_must_fix"], agg
+    assert any("hole" in m.lower() for m in agg["convergent_must_fix"])

@@ -622,15 +622,137 @@ def measure(stl: str, spec_path: str | None = None) -> dict[str, Any]:
     }
 
 
-def review(montage: str, spec_path: str, models: str | None = None) -> dict[str, Any]:
+_FIX_STOPWORDS = {
+    "a", "an", "the", "is", "are", "on", "of", "to", "add", "fix", "missing",
+    "should", "be", "in", "it", "and", "with", "this", "that", "part", "from",
+    "render", "please", "needs", "need", "make", "there", "no", "not", "for",
+    "exactly", "one", "specified", "completely", "passing", "extending",
+    "opening", "so", "its", "into", "onto", "at", "by", "as",
+}
+
+
+def _fix_tokens(text: str) -> set[str]:
+    """Salient content-word set of a must-fix string, for convergence matching.
+
+    Lowercase, drop punctuation and stopwords. Two fixes converge when their
+    token sets overlap enough (Jaccard) — robust to paraphrase, which real
+    cross-family LLM output always is ('add a through hole on the top face' vs
+    'Add exactly one through hole opening on the top face').
+    """
+    import re as _re
+    t = _re.sub(r"[^a-z0-9\s]", " ", text.lower())
+    return {w for w in t.split() if w and w not in _FIX_STOPWORDS}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+# Two must-fixes from different reviewers are "the same finding" when their
+# salient-token sets overlap at least this much. 0.4 clusters genuine paraphrases
+# (top-face through-hole findings) without merging unrelated fixes (a hole fix vs
+# an orientation fix share ~0 tokens). Erring toward clustering FAILS the gate,
+# the safe direction for a verification gate.
+_CONVERGE_JACCARD = 0.4
+
+
+def aggregate_reviews(reviewers: list[dict]) -> dict[str, Any]:
+    """Cross-family aggregation of structured reviewer verdicts (ADR-0005).
+
+    A must-fix raised by >=2 reviewers (matched by token-set Jaccard, so
+    paraphrases cluster) is CONVERGENT — a hard must-fix, our cross-family edge.
+    gate_pass is True only when there are no convergent fixes AND at least one
+    reviewer could actually judge (not all cant_tell).
+    Returns {must_fix, convergent_must_fix, verdict_counts, gate_pass, n_reviewers}.
+    """
+    verdict_counts = {"matches": 0, "needs_fixes": 0, "cant_tell": 0}
+    # greedy clusters: each is {text, tokens, models:set}
+    clusters: list[dict[str, Any]] = []
+    all_fixes: list[str] = []
+
+    for rv in reviewers:
+        v = rv.get("verdict", "cant_tell")
+        verdict_counts[v] = verdict_counts.get(v, 0) + 1
+        model = rv.get("model", "?")
+        seen_here: list[set] = []   # de-dup within one reviewer
+        for fix in rv.get("must_fix", []):
+            if not fix:
+                continue
+            all_fixes.append(fix)
+            toks = _fix_tokens(fix)
+            if any(_jaccard(toks, s) >= _CONVERGE_JACCARD for s in seen_here):
+                continue
+            seen_here.append(toks)
+            # attach to the best-matching existing cluster, else start a new one
+            best = None
+            best_sim = _CONVERGE_JACCARD
+            for c in clusters:
+                sim = _jaccard(toks, c["tokens"])
+                if sim >= best_sim:
+                    best, best_sim = c, sim
+            if best is not None:
+                best["models"].add(model)
+            else:
+                clusters.append({"text": fix, "tokens": toks, "models": {model}})
+
+    convergent = [c["text"] for c in clusters if len(c["models"]) >= 2]
+    # unique must_fix list preserving first-seen order (Jaccard de-dup)
+    unique_fixes: list[str] = []
+    seen_sets: list[set] = []
+    for f in all_fixes:
+        toks = _fix_tokens(f)
+        if any(_jaccard(toks, s) >= _CONVERGE_JACCARD for s in seen_sets):
+            continue
+        seen_sets.append(toks)
+        unique_fixes.append(f)
+
+    judged = verdict_counts["matches"] + verdict_counts["needs_fixes"]
+    gate_pass = (not convergent) and judged > 0
+    return {
+        "must_fix": unique_fixes,
+        "convergent_must_fix": convergent,
+        "verdict_counts": verdict_counts,
+        "gate_pass": gate_pass,
+        "n_reviewers": len(reviewers),
+    }
+
+
+def _parse_reviews_block(stdout: str) -> dict | None:
+    """Extract the REVIEWS_JSON {mode, reviewers} block scatter_review emits."""
+    marker = "REVIEWS_JSON"
+    if marker not in stdout:
+        return None
+    tail = stdout.split(marker, 1)[1].strip()
+    # the JSON is the first line after the marker
+    line = tail.splitlines()[0] if tail else ""
+    try:
+        return json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def review(montage: str, spec_path: str, models: str | None = None,
+           mode: str = "qa") -> dict[str, Any]:
+    """Cross-family vision gate. mode='qa' (structured Yes/No-Q&A, CADCodeVerify)
+    or 'free' (legacy free-form). Parses the structured reviewer block and
+    aggregates cross-family convergence (ADR-0005)."""
     py = cad_venv_python()
-    args = [py, str(SCRIPTS / "scatter_review.py"), montage, spec_path]
+    args = [py, str(SCRIPTS / "scatter_review.py"), montage, spec_path, "--mode", mode]
     if models:
-        args.append(models)
+        args += ["--models", models]
     r = _run(args, timeout=240)
+
+    block = _parse_reviews_block(r.stdout)
+    reviewers = block["reviewers"] if block else []
+    aggregate = aggregate_reviews(reviewers) if reviewers else None
     return {
         "success": r.returncode == 0,
-        "reviews": r.stdout,
+        "mode": mode,
+        "reviewers": reviewers,
+        "aggregate": aggregate,
+        "reviews": r.stdout,          # full human-readable text (back-compat)
         "stderr": r.stderr[-1500:],
     }
 

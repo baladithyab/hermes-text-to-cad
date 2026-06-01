@@ -55,7 +55,8 @@ def _cad_compare(args: dict, **_kw: Any) -> dict[str, Any]:
 
 
 def _cad_review(args: dict, **_kw: Any) -> dict[str, Any]:
-    return core.review(montage=args["montage"], spec_path=args["spec_path"], models=args.get("models"))
+    return core.review(montage=args["montage"], spec_path=args["spec_path"],
+                       models=args.get("models"), mode=args.get("mode", "qa"))
 
 
 # ---- CLI: `hermes cad <subcommand>` --------------------------------------
@@ -225,13 +226,16 @@ def register(ctx: Any) -> None:
         toolset="cad",
         handler=_cad_review,
         description=("Qualitative gate: cross-family multi-model VISION review of the render montage "
-                     "against the spec (intent match, feature presence/placement, defects). Needs "
+                     "against the spec. mode='qa' (default, CADCodeVerify) has each model GENERATE "
+                     "spec-derived Yes/No questions, ANSWER them against the render with reasoning, "
+                     "and turn 'no's into must_fix; mode='free' is legacy free-form critique. "
+                     "Cross-family convergence (>=2 models agree) = hard must-fix. Needs "
                      "OPENROUTER_API_KEY. Catches intent errors the numeric gate cannot. Step 5."),
         emoji="👁️",
         requires_env=["OPENROUTER_API_KEY"],
         schema={
             "name": "cad_review",
-            "description": "Cross-family vision gate over the render montage vs spec.",
+            "description": "Cross-family vision gate over the render montage vs spec (structured Q&A or free-form).",
             "parameters": {
                 "type": "object",
                 "required": ["montage", "spec_path"],
@@ -239,6 +243,7 @@ def register(ctx: Any) -> None:
                     "montage": {"type": "string", "description": "Path to the 3-view montage PNG."},
                     "spec_path": {"type": "string", "description": "Path to spec.json."},
                     "models": {"type": "string", "description": "Optional comma-separated model slugs (default: gemini/opus/gpt cross-family)."},
+                    "mode": {"type": "string", "enum": ["qa", "free"], "description": "qa = structured Yes/No-Q&A (default); free = legacy free-form critique."},
                 },
             },
         },

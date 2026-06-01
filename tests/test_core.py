@@ -255,7 +255,9 @@ def test_review_builds_argv_without_models(monkeypatch):
     assert argv[1].endswith("scripts/scatter_review.py")
     assert argv[2] == "/x/m.png"
     assert argv[3] == "/x/spec.json"
-    assert len(argv) == 4   # no models arg appended
+    # default mode is qa, passed explicitly; no --models when none given
+    assert "--mode" in argv and argv[argv.index("--mode") + 1] == "qa"
+    assert "--models" not in argv
     assert res["success"] is True
     assert res["reviews"] == "reviews..."
 
@@ -265,7 +267,30 @@ def test_review_appends_models(monkeypatch):
     with patch_run(returncode=0, stdout="ok") as m:
         core.review(montage="/x/m.png", spec_path="/x/s.json", models="a/b,c/d")
     argv = m.call_args.args[0]
-    assert argv[-1] == "a/b,c/d"
+    assert "--models" in argv and argv[argv.index("--models") + 1] == "a/b,c/d"
+
+
+def test_review_passes_free_mode(monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    with patch_run(returncode=0, stdout="ok") as m:
+        core.review(montage="/x/m.png", spec_path="/x/s.json", mode="free")
+    argv = m.call_args.args[0]
+    assert argv[argv.index("--mode") + 1] == "free"
+
+
+def test_review_parses_structured_block(monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    import json as _json
+    block = _json.dumps({"mode": "qa", "reviewers": [
+        {"model": "a/x", "verdict": "needs_fixes", "must_fix": ["missing hole"]},
+        {"model": "b/y", "verdict": "needs_fixes", "must_fix": ["the hole is missing"]},
+    ]})
+    stdout = "human readable stuff\nREVIEWS_JSON\n" + block + "\n"
+    with patch_run(returncode=0, stdout=stdout):
+        res = core.review(montage="/x/m.png", spec_path="/x/s.json")
+    assert len(res["reviewers"]) == 2
+    assert res["aggregate"]["gate_pass"] is False
+    assert res["aggregate"]["convergent_must_fix"]
 
 
 # ---- doctor -------------------------------------------------------------------
