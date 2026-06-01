@@ -68,8 +68,12 @@ def test_generate_openscad_builds_argv(tmp_path, monkeypatch):
         return CompletedStub(0, "", "")
 
     scad = "cube([10,10,10]);"
+    # emit_glb=False: this unit-test asserts the openscad ARGV, not the GLB/
+    # topology export step (ADR-0013) — which would otherwise fire a second mocked
+    # subprocess call and shift m.call_args off the openscad invocation.
     with mock.patch.object(core.subprocess, "run", side_effect=se) as m:
-        res = core.generate(code=scad, out_dir=str(tmp_path), stem="part", backend="openscad")
+        res = core.generate(code=scad, out_dir=str(tmp_path), stem="part",
+                            backend="openscad", emit_glb=False)
 
     argv = m.call_args.args[0]
     assert argv[0] == "/usr/bin/openscad"
@@ -97,7 +101,8 @@ def test_generate_openscad_skips_ast_check(tmp_path, monkeypatch):
 
     with mock.patch.object(core.subprocess, "run", side_effect=se):
         res = core.generate(code="module socket(){cube(5);} socket();",
-                            out_dir=str(tmp_path), stem="part", backend="openscad")
+                            out_dir=str(tmp_path), stem="part", backend="openscad",
+                            emit_glb=False)
     assert res["success"] is True
     assert res.get("rejected") in (None, False)
 
@@ -113,7 +118,8 @@ def test_generate_openscad_scrubbed_env(tmp_path, monkeypatch):
         return CompletedStub(0, "", "")
 
     with mock.patch.object(core.subprocess, "run", side_effect=se) as m:
-        core.generate(code="cube(5);", out_dir=str(tmp_path), stem="part", backend="openscad")
+        core.generate(code="cube(5);", out_dir=str(tmp_path), stem="part",
+                      backend="openscad", emit_glb=False)
     assert "OPENROUTER_API_KEY" not in m.call_args.kwargs["env"]
 
 

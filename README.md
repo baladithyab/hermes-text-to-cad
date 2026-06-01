@@ -11,10 +11,12 @@ A model is only "done" when **both** gates pass. This is the architecture the 20
 ## The loop
 
 ```
-prompt → derive spec (NL → machine-checkable assertions) →
-  generate (CadQuery) → render (3-view PNG) →
+prompt → derive spec (NL → machine-checkable assertions + intent/frame/features) →
+  generate (CadQuery → STL + STEP + GLB + topology sidecar) →
+  render (PBR studio 3-view PNG, per-body color from the GLB) →
   ├─ numeric gate (trimesh): bbox / watertight / volume / shells
-  │                          + through-holes (genus) / solidity  vs spec
+  │                          + through-holes (genus) / solidity
+  │                          + manifold / centroid / symmetry / placement  vs spec
   └─ vision gate (Gemini + Opus + GPT, cross-family): intent match
 → iterate on convergent findings → repeat (hard cap, keep best-so-far)
 ```
@@ -29,11 +31,11 @@ hole** fails the gate, a case a bbox-only check silently passes.
 
 | Tool | Step | What it does |
 |------|------|--------------|
-| `cad_spec_from_prompt` | 1 | Derive a machine-checkable geometric spec (bbox / through-holes / shells / internal-features) from an NL prompt — deterministic, no model call |
-| `cad_plan` | 1.5 | Emit a structured CoT modeling plan (primitives → operations → features → export) seeded from the derived spec — optional, deterministic ([CAD-Coder](docs/adr/0007-cad-plan-cot-step.md)) |
-| `cad_generate` | 2 | Run CadQuery (→ STL + STEP) or OpenSCAD (`backend="openscad"`, → STL) modeling code. Executes model-authored code — see [Security](#️-security-cad_generate-executes-model-authored-python) |
-| `cad_render`   | 3 | Headless 3-view montage PNG (display → OSMesa → Xvfb → matplotlib precedence); `section` adds an internal-feature cutaway view |
-| `cad_measure`  | 4 | Numeric gate: measure + assert vs spec.json (`gate_pass` bool); through-hole (genus) & solidity checks |
+| `cad_spec_from_prompt` | 1 | Derive a machine-checkable geometric spec from an NL prompt — bbox / through-holes / shells / internal-features **plus** intent, coordinate frame, named features, assumptions, and symmetry ([spec contract v2](docs/adr/0011-spec-contract-v2-and-placement-gate.md)). Deterministic, no model call |
+| `cad_plan` | 1.5 | Emit a structured CoT modeling plan (primitives → operations → features → export) seeded from the derived spec, now with a coordinate-frame + per-feature placement narrative, a `claims_require` self-check ("never claim done unless the tool ran"), and `repair_classes` — optional, deterministic ([CAD-Coder](docs/adr/0007-cad-plan-cot-step.md)) |
+| `cad_generate` | 2 | Run CadQuery (→ STL + STEP) or OpenSCAD (`backend="openscad"`, → STL) modeling code. On success also emits **`<stem>.glb`** (per-body-color PBR render input) + **`<stem>.topology.json`** (machine-readable sidecar) unless `emit_glb=false` ([ADR-0013](docs/adr/0013-generator-artifacts-glb-topology-sidecar.md)). Executes model-authored code — see [Security](#️-security-cad_generate-executes-model-authored-python) |
+| `cad_render`   | 3 | Headless 3-view montage PNG with **PBR studio lighting** (GLTF import + image-based lighting + 3-point rig + soft shadows + filmic tone mapping — [ADR-0010](docs/adr/0010-pbr-render-path.md)); prefers a sibling `.glb` for per-body color, falls back to STL then matplotlib (display → OSMesa → Xvfb → matplotlib precedence); `section` adds an internal-feature cutaway view |
+| `cad_measure`  | 4 | Numeric gate: measure + assert vs spec.json (`gate_pass` bool); through-hole (genus) & solidity, **plus manifold / degenerate-face / centroid / symmetry / per-body placement** checks ([placement gate](docs/adr/0011-spec-contract-v2-and-placement-gate.md)) — *numeric-PASS ≠ correct placement* |
 | `cad_compare`  | 4b | Similarity gate: Chamfer Distance vs a reference mesh for "make it like THIS" tasks |
 | `cad_review`   | 5 | Cross-family vision gate — structured Yes/No-Q&A (CADCodeVerify) by default (needs `OPENROUTER_API_KEY`) |
 
@@ -121,16 +123,37 @@ layers ship by default-or-opt-in (full detail in [`SECURITY.md`](SECURITY.md)):
 | OpenSCAD (optional) | CSG-style authoring, parameter sliders | needs `openscad` binary; mesh-only |
 | Zoo/KCL (optional) | organic / freeform surfaces | cloud, needs `ZOO_API_TOKEN` |
 
+## Render quality (PBR studio)
+
+The render gate feeds the vision gate, so render legibility *is* a correctness
+lever. `cad_render` uses a physically-based studio pipeline ([ADR-0010](docs/adr/0010-pbr-render-path.md)):
+`vtkGLTFImporter` loads a colored multi-body GLB (one PBR actor per body, per-body
+color preserved), lit by a procedural equirectangular **image-based light** + a
+3-point studio rig with **soft shadows**, and tone-mapped with VTK's in-pipeline
+**GenericFilmic** curve — all stock VTK 9.3, no new dependencies. A material-less
+STL gets a synthesized neutral studio material; matplotlib remains the no-GL
+fallback. The result reads as a product shot (per-body color, specular, grounded
+shadow) instead of a flat mono-color blob, so the vision gate sees a legible part.
+
 ## Status
 
-v0.3.0 — closed loop + security + verification depth + portability. Done and verified:
+v0.3.0 closed-loop core + a **reference-uplift** pass (clean-room study of two
+public CAD repos → original implementations; see
+[`docs/research/reference-steal.md`](docs/research/reference-steal.md)). Done and verified:
 **SECURITY** (scrubbed secret-free subprocess env, AST denylist, opt-in bubblewrap
-sandbox — see [`SECURITY.md`](SECURITY.md)); **Wave 1** (prompt-derived geometric
-tests, ReAct error-feedback); **Wave 2** (structured-Q&A vision gate, Chamfer-Distance
-`cad_compare`, `cad_plan` CoT step); **Wave 3** (crash-safe headless rendering,
-section/cutaway renders, OpenSCAD backend). Decisions recorded as ADRs in
-[`docs/adr/`](docs/adr/). See [`PLAN.md`](PLAN.md) for the remaining backlog
-(Wave 3.4 Zoo/KCL organic fallback, Wave 4 polish).
+sandbox — see [`SECURITY.md`](SECURITY.md)); **prompt-derived geometric tests** +
+ReAct error-feedback; **structured-Q&A vision gate**, Chamfer-Distance `cad_compare`,
+`cad_plan` CoT step; **crash-safe headless rendering**, section/cutaway renders,
+OpenSCAD backend; **PBR studio render** with per-body GLB color ([ADR-0010](docs/adr/0010-pbr-render-path.md));
+**spec contract v2** (intent / coordinate frame / named features / assumptions /
+symmetry) + a **placement/manifold gate** (centroid, symmetry, manifold,
+degenerate-face, per-body checks — *numeric-PASS ≠ correct placement*,
+[ADR-0011](docs/adr/0011-spec-contract-v2-and-placement-gate.md)); a first-party
+**parametric geometry-helper library** ([ADR-0012](docs/adr/0012-first-party-geometry-helper-library.md));
+and a **generator contract** that emits STL + STEP + GLB + topology sidecar
+([ADR-0013](docs/adr/0013-generator-artifacts-glb-topology-sidecar.md)). Decisions
+recorded as ADRs in [`docs/adr/`](docs/adr/). See [`PLAN.md`](PLAN.md) for the
+remaining backlog (Wave 3.4 Zoo/KCL organic fallback, Wave 4 polish).
 
 ## Credit
 

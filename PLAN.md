@@ -117,6 +117,62 @@ Research: CADTests (arXiv 2605.07807) shows executable per-prompt geometric asse
 
 **4.4 — Docs site / GIF.** A short demo of the loop catching and fixing a bad part.
 
+**4.2 (partial) — DONE:** multi-part alignment / feature-placement assertions
+shipped as the placement gate (centroid / symmetry / `expect_centroid` /
+`expect_bodies`) in the reference-uplift pass below ([ADR-0011](docs/adr/0011-spec-contract-v2-and-placement-gate.md)).
+
+---
+
+## Reference-uplift pass (2026-05-31) — "steal everything" (clean-room) — ✅ DONE
+
+Goal per the directive: level up the plugin toward **correct, faithful,
+non-deformed, well-rendered** models by clean-room studying two reference CAD
+repos (earthtojake/text-to-cad, Adam-CAD/CADAM — both ALL-RIGHTS-RESERVED, so
+techniques/ideas only, original authorship) and adopting their best techniques in
+our style. Research: [`docs/research/reference-steal.md`](docs/research/reference-steal.md)
+(license-guard reviewed CLEAN). Four waves, each committed at its boundary with a
+concurrent adversarial review feeding fixes back before commit.
+
+**U1 — Study.** 4 parallel clean-room study agents → `reference-steal.md`: a
+22-technique adoption table (render quality / generation correctness / pipeline /
+geometry vocabulary) with `file:line` cites, ranked by ROI for the user's goal.
+
+**U2 — PBR render ([ADR-0010](docs/adr/0010-pbr-render-path.md)).** Replaced the
+flat `vtkSTLReader` montage with a PBR studio path: `vtkGLTFImporter` (per-body
+color), procedural equirectangular image-based lighting, 3-point studio rig, soft
+shadow pass, in-pipeline GenericFilmic tone mapping. GLB-preferred input
+(`--no-glb` opts out); STL gets a synthesized material; matplotlib stays the no-GL
+fallback. *Proven* on the 8-body masterball.glb (real before/after image diff).
+Review fixed: section-render rainbow-LUT recolor + silent blank on corrupt GLB.
+
+**U3 — Generation correctness ([ADR-0011](docs/adr/0011-spec-contract-v2-and-placement-gate.md)/[0012](docs/adr/0012-first-party-geometry-helper-library.md)).**
+(1) Spec contract v2: `derive_spec` adds intent (over-delivery guard),
+coordinate_frame (origin by part class), structured features, assumptions, and
+symmetry; `plan` adds a placement narrative, `claims_require`, and `repair_classes`.
+(2) Placement/manifold gate: `measure.py` adds unsorted bbox / body_centroids /
+is_winding_consistent / degenerate_faces / is_volume; `gate()` adds manifold /
+max_degenerate_faces / symmetry / expect_centroid / expect_bodies (pure math in
+`scripts/placement.py`) — *numeric-PASS ≠ correct placement*. (3) First-party
+`scripts/cad_helpers.py`: self-validating teardrop / loft / sweep / revolve /
+safe_fillet / shell / flush_emblem / disc_in_ring_button. Review fixed a HIGH bug:
+the symmetry gate was silently vacuous on the dict spec `derive_spec` actually
+emits (it iterated dict keys, not axes) — now accepts both shapes, regression-
+tested at the derive_spec→gate seam.
+
+**U4 — Generator contract ([ADR-0013](docs/adr/0013-generator-artifacts-glb-topology-sidecar.md)).**
+`cad_generate` now emits `<stem>.glb` (kept if the code authored a colored
+assembly GLB, else synthesized) + `<stem>.topology.json` (authoritative geometry
+from the STL + a distinct render-color manifest from the GLB + sourceHash
+provenance) unless `emit_glb=false`. `scripts/export_artifacts.py` runs as a
+decoupled CAD-venv step; the render gate consumes the sibling GLB end-to-end.
+*Proven*: a blue-base/red-knob assembly → kept GLB → PBR render shows per-body
+color; sidecar reports 1 valid solid (STL truth) + 2 distinct render materials.
+
+*Invariants held throughout:* CAD stack subprocess-isolated (core imports zero
+heavy modules; scripts load bare with lazy imports); v0.3.0 security guarantees
+intact (scrubbed env + AST denylist, re-run green); every wave proven by a real
+run/test, not a claim. Suite: 266 → 405 pass + 1 skip.
+
 ---
 
 ## Pre-push smoke test (run before EVERY commit)

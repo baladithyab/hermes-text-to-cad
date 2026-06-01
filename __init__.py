@@ -39,7 +39,8 @@ def _cad_plan(args: dict, **_kw: Any) -> dict[str, Any]:
 
 def _cad_generate(args: dict, **_kw: Any) -> dict[str, Any]:
     return core.generate(code=args["code"], out_dir=args.get("out_dir"),
-                         stem=args.get("stem", "part"), backend=args.get("backend", "cadquery"))
+                         stem=args.get("stem", "part"), backend=args.get("backend", "cadquery"),
+                         emit_glb=args.get("emit_glb", True))
 
 
 def _cad_render(args: dict, **_kw: Any) -> dict[str, Any]:
@@ -141,14 +142,18 @@ def register(ctx: Any) -> None:
                      "(default): CadQuery Python that exports <stem>.stl and <stem>.step into "
                      "the CAD_OUT directory (os.environ['CAD_OUT']) — returns STL (mesh) + STEP "
                      "(B-rep). backend='openscad': SCAD source run via the openscad binary -> "
-                     "STL only (mesh, no STEP). SECURITY: cadquery code is model-authored and "
-                     "executed; it runs with a scrubbed secret-free env + an AST pre-check, and "
-                     "with HERMES_CAD_SANDBOX=1 inside a no-network read-only sandbox. Step 2 of "
-                     "the closed CAD loop."),
+                     "STL only (mesh, no STEP). On success it ALSO emits <stem>.glb (per-body "
+                     "color render input for cad_render's PBR gate) + <stem>.topology.json (a "
+                     "machine-readable sidecar: bbox, counts, per-body table, valid) unless "
+                     "emit_glb=false. To get per-body COLOR in the render, build a cq.Assembly "
+                     "with .color and export it as the GLB. SECURITY: cadquery code is "
+                     "model-authored and executed; it runs with a scrubbed secret-free env + an "
+                     "AST pre-check, and with HERMES_CAD_SANDBOX=1 inside a no-network read-only "
+                     "sandbox. Step 2 of the closed CAD loop."),
         emoji="📐",
         schema={
             "name": "cad_generate",
-            "description": "Run CadQuery (->STL+STEP) or OpenSCAD (->STL) code, exporting into $CAD_OUT.",
+            "description": "Run CadQuery (->STL+STEP+GLB+topology) or OpenSCAD (->STL+GLB+topology) code, exporting into $CAD_OUT.",
             "parameters": {
                 "type": "object",
                 "required": ["code"],
@@ -157,6 +162,7 @@ def register(ctx: Any) -> None:
                     "out_dir": {"type": "string", "description": "Output dir; temp dir if omitted."},
                     "stem": {"type": "string", "description": "Filename stem (default 'part')."},
                     "backend": {"type": "string", "enum": ["cadquery", "openscad"], "description": "Modeling backend (default 'cadquery'; 'openscad' is mesh-only)."},
+                    "emit_glb": {"type": "boolean", "description": "Emit <stem>.glb + <stem>.topology.json on success (default true). Set false to skip the GLB/sidecar (e.g. numeric-only checks)."},
                 },
             },
         },

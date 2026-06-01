@@ -764,21 +764,66 @@ def venv_ready() -> bool:
     return r.returncode == 0 and "ok" in r.stdout
 
 
+def export_artifacts(stl: str, step: str | None = None, out_dir: str | None = None,
+                     stem: str = "part", emit_glb: bool = True,
+                     source_hash: str | None = None) -> dict[str, Any]:
+    """Emit the GLB + topology sidecar next to an STL (ADR-0013).
+
+    Shells out to scripts/export_artifacts.py in the CAD venv: writes
+    <stem>.topology.json (always) and <stem>.glb (unless an agent-authored one
+    already exists, or emit_glb=False). Returns {success, glb, topology}. Never
+    raises — a failed export degrades to {success: False} so it can't sink a
+    successful generate.
+    """
+    py = cad_venv_python()
+    script = SCRIPTS / "export_artifacts.py"
+    if not Path(py).exists() or not script.exists():
+        return {"success": False, "glb": None, "topology": None}
+    args = [py, str(script), str(stl)]
+    if step:
+        args += ["--step", str(step)]
+    if not emit_glb:
+        args.append("--no-glb")
+    if source_hash:
+        args += ["--source-hash", source_hash]
+    try:
+        r = _run(args, timeout=180)
+    except Exception:
+        logger.warning("export_artifacts: subprocess failed", exc_info=True)
+        return {"success": False, "glb": None, "topology": None}
+    topo = r.stdout.strip().splitlines()[-1].strip() if (r.returncode == 0 and r.stdout.strip()) else None
+    out_dir = out_dir or os.path.dirname(os.path.abspath(stl))
+    # The script names artifacts from the STL basename — derive the GLB path the
+    # SAME way (not from `stem`), so a caller passing a mismatched stem still finds
+    # the file the script actually wrote (review LOW finding). In generate() stem
+    # always equals the STL basename, so this is a no-op there.
+    art_stem = os.path.splitext(os.path.basename(stl))[0]
+    glb = os.path.join(out_dir, f"{art_stem}.glb")
+    glb_ok = os.path.exists(glb) and os.path.getsize(glb) > 0
+    return {
+        "success": r.returncode == 0 and bool(topo) and os.path.exists(topo),
+        "glb": glb if glb_ok else None,
+        "topology": topo if (topo and os.path.exists(topo)) else None,
+    }
+
+
 def generate(code: str, out_dir: str | None = None, stem: str = "part",
-             backend: str = "cadquery") -> dict[str, Any]:
+             backend: str = "cadquery", emit_glb: bool = True) -> dict[str, Any]:
     """Execute user-supplied modeling code and export a mesh.
 
     backend="cadquery" (default): runs the code as Python in the CAD venv; it
     should export <stem>.stl and <stem>.step into CAD_OUT. backend="openscad":
     treats `code` as SCAD source and runs the openscad binary -> <stem>.stl
-    (mesh-only, no STEP — ADR-0008). Returns {success, backend, out_dir, stl,
-    step, stdout, stderr}.
+    (mesh-only, no STEP — ADR-0008). On a successful build, also emits a
+    <stem>.glb (PBR render input) + <stem>.topology.json sidecar (numeric-gate
+    ground truth) unless emit_glb=False (ADR-0013). Returns {success, backend,
+    out_dir, stl, step, glb, topology, stdout, stderr}.
     """
     out = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="cad_"))
     out.mkdir(parents=True, exist_ok=True)
 
     if backend == "openscad":
-        return _generate_openscad(code, out, stem)
+        return _generate_openscad(code, out, stem, emit_glb=emit_glb)
     if backend != "cadquery":
         return {
             "success": False, "backend": backend, "out_dir": str(out),
@@ -840,24 +885,44 @@ def generate(code: str, out_dir: str | None = None, stem: str = "part",
     stl = out / f"{stem}.stl"
     step = out / f"{stem}.step"
     stl_ok = stl.exists() and stl.stat().st_size > 0
-    return {
-        "success": r.returncode == 0 and stl_ok,
+    success = r.returncode == 0 and stl_ok
+    result: dict[str, Any] = {
+        "success": success,
         "backend": "cadquery",
         "sandbox": sandbox_state,
         "out_dir": str(out),
         "stl": str(stl) if stl_ok else None,
         "step": str(step) if (step.exists() and step.stat().st_size > 0) else None,
+        "glb": None,
+        "topology": None,
         "stdout": r.stdout[-2000:],
         "stderr": r.stderr[-3000:],
     }
+    # Complete the generator contract (ADR-0013): emit GLB + topology sidecar from
+    # the freshly-built STL. Best-effort — a failed export never sinks a good build.
+    if success and emit_glb:
+        art = export_artifacts(str(stl), step=result["step"], out_dir=str(out),
+                               stem=stem, source_hash=_source_hash(code))
+        result["glb"] = art.get("glb")
+        result["topology"] = art.get("topology")
+    return result
 
 
-def _generate_openscad(code: str, out: Path, stem: str) -> dict[str, Any]:
+def _source_hash(code: str) -> str:
+    """sha256 of the generator source — provenance for the topology sidecar so a
+    stale sidecar can be detected (a tamper-evident model->artifact link)."""
+    import hashlib
+    return hashlib.sha256(code.encode("utf-8", "ignore")).hexdigest()
+
+
+def _generate_openscad(code: str, out: Path, stem: str,
+                       emit_glb: bool = True) -> dict[str, Any]:
     """OpenSCAD backend (ADR-0008): write .scad, run `openscad -o <stem>.stl`.
 
     Mesh-only (no STEP). The Python AST denylist does NOT apply (SCAD isn't
     Python); the scrubbed env (ADR-0001) and opt-in sandbox (ADR-0002) still do.
-    Returns a clear error (no crash) when no openscad binary is found.
+    On a successful build, also emits a GLB + topology sidecar (ADR-0013) unless
+    emit_glb=False. Returns a clear error (no crash) when no openscad binary is found.
     """
     binary = openscad_bin()
     if not binary:
@@ -899,16 +964,25 @@ def _generate_openscad(code: str, out: Path, stem: str) -> dict[str, Any]:
                 "stderr": repr(e)}
 
     stl_ok = stl.exists() and stl.stat().st_size > 0
-    return {
-        "success": r.returncode == 0 and stl_ok,
+    success = r.returncode == 0 and stl_ok
+    result: dict[str, Any] = {
+        "success": success,
         "backend": "openscad",
         "sandbox": sandbox_state,
         "out_dir": str(out),
         "stl": str(stl) if stl_ok else None,
         "step": None,   # OpenSCAD is mesh-only (ADR-0008)
+        "glb": None,
+        "topology": None,
         "stdout": r.stdout[-2000:],
         "stderr": r.stderr[-3000:],
     }
+    if success and emit_glb:
+        art = export_artifacts(str(stl), step=None, out_dir=str(out),
+                               stem=stem, source_hash=_source_hash(code))
+        result["glb"] = art.get("glb")
+        result["topology"] = art.get("topology")
+    return result
 
 
 def _parse_backend(stderr: str) -> str:
@@ -1215,7 +1289,9 @@ def doctor() -> dict[str, Any]:
                    "detail": "OPENROUTER_API_KEY present" if has_or_key
                              else "OPTIONAL: set OPENROUTER_API_KEY in ~/.hermes/.env for the multi-model vision gate"})
 
-    scripts_ok = all((SCRIPTS / s).exists() for s in ("render.py", "measure.py", "scatter_review.py"))
+    scripts_ok = all((SCRIPTS / s).exists() for s in
+                     ("render.py", "measure.py", "scatter_review.py",
+                      "export_artifacts.py", "placement.py", "cad_helpers.py", "pbr.py"))
     checks.append({"check": "scripts_present", "pass": scripts_ok, "detail": str(SCRIPTS)})
 
     # Sandbox availability (ADR-0002). Not required for readiness — generated

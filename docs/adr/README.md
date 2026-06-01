@@ -17,6 +17,7 @@ once accepted; a reversal is a new ADR that supersedes the old one.
 | [0010](0010-pbr-render-path.md) | PBR render path (GLTF import + IBL + studio rig + filmic tone mapping) | accepted | uplift-2 |
 | [0011](0011-spec-contract-v2-and-placement-gate.md) | Spec contract v2 (intent/frame/features/symmetry) + placement/manifold gate | accepted | uplift-3 |
 | [0012](0012-first-party-geometry-helper-library.md) | First-party parametric geometry-helper library | accepted | uplift-3 |
+| [0013](0013-generator-artifacts-glb-topology-sidecar.md) | Generator emits GLB + topology sidecar alongside STL/STEP | accepted | uplift-4 |
 
 ## Cross-cutting invariants (apply to every ADR)
 
