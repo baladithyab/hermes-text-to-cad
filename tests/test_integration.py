@@ -433,3 +433,49 @@ def test_qa_vision_gate_flags_missing_through_hole(tmp_path):
     assert agg["gate_pass"] is False, agg
     assert agg["convergent_must_fix"], agg
     assert any("hole" in m.lower() for m in agg["convergent_must_fix"])
+
+
+# ---- Wave 3.2: section/cutaway render for internal features ------------------
+
+def test_section_render_reveals_internal_channel(tmp_path):
+    """ADR-0009 acceptance: a part with an internal horizontal bore, rendered with
+    section=True, produces a 4th cutaway panel that exposes the hidden channel.
+    The section montage must be WIDER than the plain 3-view montage (extra panel).
+    """
+    # a 40x30x20 block with a 8mm horizontal bore through the middle (internal,
+    # invisible from top/front/iso silhouettes of a closed solid)
+    code = (
+        "import cadquery as cq, os\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        "part = (cq.Workplane('XY').box(40, 30, 20)\n"
+        "        .faces('>X').workplane().pushPoints([(0,0)]).hole(8))\n"
+        "cq.exporters.export(part, os.path.join(OUT, 'part.stl'))\n"
+    )
+    # render the plain and section variants from SEPARATE dirs so their montages
+    # (both default to <stem>_montage.png) don't collide.
+    plain_dir = tmp_path / "plain"; sect_dir = tmp_path / "sect"
+    plain_dir.mkdir(); sect_dir.mkdir()
+    g1 = core.generate(code=code, out_dir=str(plain_dir), stem="part")
+    g2 = core.generate(code=code, out_dir=str(sect_dir), stem="part")
+    assert g1["success"] and g2["success"], (g1.get("stderr"), g2.get("stderr"))
+
+    plain = core.render(stl=g1["stl"])
+    assert plain["success"], plain.get("stderr")
+
+    sect = core.render(stl=g2["stl"], section="x")
+    assert sect["success"], sect.get("stderr")
+    # the section file exists in the section dir
+    assert (sect_dir / "part_section.png").exists()
+
+    # the section montage has one more panel (4 vs 3), so it's wider
+    from PIL import Image
+    w_plain = Image.open(plain["montage"]).width
+    w_sect = Image.open(sect["montage"]).width
+    assert w_sect > w_plain, (w_sect, w_plain)
+
+
+def test_derive_spec_internal_features_drives_section(tmp_path):
+    """End-to-end: a prompt mentioning an internal channel flags internal_features,
+    which an agent uses to request section=True."""
+    spec = core.derive_spec("a block with an internal cooling channel")
+    assert spec.get("internal_features") is True

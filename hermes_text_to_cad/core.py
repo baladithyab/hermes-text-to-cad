@@ -220,6 +220,15 @@ _ASSEMBLY_RE = re.compile(
     r"(\d+)[\s-]*(?:part|piece)s?)\b",
     re.IGNORECASE,
 )
+# Internal geometry that the standard front/top/iso views can't show — warrants a
+# section/cutaway render (ADR-0009). Word-anchored so "channel", "cavity" etc.
+# match but "manifold"/unrelated words don't. "hollow" is included (shelled part).
+_INTERNAL_RE = re.compile(
+    r"\b(?:internal|inner|hollow(?:ed)?|cavity|cavities|bore|bores|"
+    r"channel|channels|passage|passages|duct|ducts|cooling\s+(?:channel|passage)|"
+    r"lumen|conduit)\b",
+    re.IGNORECASE,
+)
 
 DEFAULT_TOL_MM = 0.5
 
@@ -272,6 +281,11 @@ def derive_spec(prompt: str) -> dict[str, Any]:
         spec["max_shells"] = 2
     else:
         spec["max_shells"] = 1
+
+    # Internal-feature hint (ADR-0009): a part with hidden internal geometry
+    # warrants a section/cutaway render so the vision gate can see it.
+    if _INTERNAL_RE.search(low):
+        spec["internal_features"] = True
 
     return spec
 

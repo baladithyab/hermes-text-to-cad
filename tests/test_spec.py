@@ -140,6 +140,24 @@ def test_derive_spec_has_default_tolerance():
     assert spec["tol_mm"] > 0
 
 
+def test_derive_spec_flags_internal_features():
+    # Wave 3.2 / ADR-0009: prompts mentioning internal geometry set the flag so
+    # core.render can request a section/cutaway view.
+    for prompt in ("a manifold block with an internal cooling channel",
+                   "a part with a horizontal bore",
+                   "an enclosure with an internal cavity",
+                   "a hollow box",
+                   "a duct with an internal passage"):
+        spec = core.derive_spec(prompt)
+        assert spec.get("internal_features") is True, f"{prompt!r} should flag internal_features"
+
+
+def test_derive_spec_no_internal_features_for_plain_part():
+    spec = core.derive_spec("a 40x30x20 mounting plate with 4 holes")
+    # plain through-holes are visible in standard views — not 'internal'
+    assert "internal_features" not in spec or spec["internal_features"] is False
+
+
 def test_derive_spec_records_prompt():
     spec = core.derive_spec("a 40x30x20 block with a through hole")
     assert spec["prompt"] == "a 40x30x20 block with a through hole"
