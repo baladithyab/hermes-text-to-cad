@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -823,21 +824,32 @@ _FIX_STOPWORDS = {
     "should", "be", "in", "it", "and", "with", "this", "that", "part", "from",
     "render", "please", "needs", "need", "make", "there", "no", "not", "for",
     "exactly", "one", "specified", "completely", "passing", "extending",
-    "opening", "so", "its", "into", "onto", "at", "by", "as",
+    "so", "its", "into", "onto", "at", "by", "as",
+}
+
+# Canonicalize common feature synonyms so reviewers from different families
+# converge: 'add an opening' and 'add a hole' describe the same defect. NOTE
+# 'opening' is NOT a stopword (it carries meaning) — it maps to 'hole'.
+_FIX_SYNONYMS = {
+    "opening": "hole", "openings": "hole", "bore": "hole", "bores": "hole",
+    "cutout": "hole", "aperture": "hole", "perforation": "hole",
+    "holes": "hole", "slots": "slot", "fillets": "fillet", "chamfers": "chamfer",
 }
 
 
 def _fix_tokens(text: str) -> set[str]:
     """Salient content-word set of a must-fix string, for convergence matching.
 
-    Lowercase, drop punctuation and stopwords. Two fixes converge when their
-    token sets overlap enough (Jaccard) — robust to paraphrase, which real
-    cross-family LLM output always is ('add a through hole on the top face' vs
-    'Add exactly one through hole opening on the top face').
+    Lowercase, drop punctuation and stopwords, then canonicalize feature
+    synonyms (opening/bore -> hole). Two fixes converge when their token sets
+    overlap enough (Jaccard) — robust to paraphrase, which real cross-family LLM
+    output always is ('add a through hole on the top face' vs 'Add exactly one
+    through hole opening on the top face', or 'add an opening' vs 'add a hole').
     """
     import re as _re
     t = _re.sub(r"[^a-z0-9\s]", " ", text.lower())
-    return {w for w in t.split() if w and w not in _FIX_STOPWORDS}
+    return {_FIX_SYNONYMS.get(w, w) for w in t.split()
+            if w and w not in _FIX_STOPWORDS}
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -916,15 +928,27 @@ def aggregate_reviews(reviewers: list[dict]) -> dict[str, Any]:
 
 
 def _parse_reviews_block(stdout: str) -> dict | None:
-    """Extract the REVIEWS_JSON {mode, reviewers} block scatter_review emits."""
+    """Extract the genuine REVIEWS_JSON {mode, reviewers} block scatter_review emits.
+
+    SECURITY: a reviewer's verbatim reply (printed in the human-readable summary
+    BEFORE the genuine block) can itself contain a 'REVIEWS_JSON\\n{...}' to spoof
+    the gate FAIL->PASS. scatter_review always prints the genuine marker as its
+    own standalone line, LAST, with the JSON on the very next line. So we anchor
+    on a line whose stripped value EQUALS the marker and take the LAST such line —
+    a mid-line injection fails the equality, and an own-line injection appears
+    earlier than the genuine one. (split-on-first is spoofable; rsplit is wrong
+    too, since json.dumps embeds the raw reply verbatim into the genuine line.)
+    """
     marker = "REVIEWS_JSON"
-    if marker not in stdout:
+    lines = stdout.splitlines()
+    idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == marker:
+            idx = i  # keep the LAST standalone-marker line (the genuine block)
+    if idx is None or idx + 1 >= len(lines):
         return None
-    tail = stdout.split(marker, 1)[1].strip()
-    # the JSON is the first line after the marker
-    line = tail.splitlines()[0] if tail else ""
     try:
-        return json.loads(line)
+        return json.loads(lines[idx + 1])
     except (json.JSONDecodeError, ValueError):
         return None
 
@@ -973,6 +997,11 @@ def compare(generated: str, reference: str, samples: int | None = None,
     except (json.JSONDecodeError, ValueError):
         report = {"raw": r.stdout[-2000:], "stderr": r.stderr[-1000:]}
     cd = report.get("chamfer_distance") if isinstance(report, dict) else None
+    # A NaN/Inf score is not a valid distance — collapse it to the failure
+    # contract rather than letting it masquerade as a real measurement.
+    if cd is not None and not (isinstance(cd, (int, float)) and math.isfinite(cd)):
+        logger.warning("cad_compare: non-finite chamfer_distance %r — treating as failure", cd)
+        cd = None
     return {
         "success": r.returncode == 0 and cd is not None,
         "chamfer_distance": cd,

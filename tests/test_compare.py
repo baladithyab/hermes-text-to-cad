@@ -78,3 +78,40 @@ def test_compare_nonjson_stdout_falls_back(monkeypatch):
         res = core.compare(generated="/x/g.stl", reference="/x/r.stl")
     assert res["success"] is False
     assert "raw" in res["report"]
+
+
+# ---- final-review fixes: non-finite CD + samples guard -----------------------
+
+@pytest.mark.parametrize("bad", ["Infinity", "-Infinity", "NaN"])
+def test_compare_rejects_non_finite_cd(monkeypatch, bad):
+    # final-review MEDIUM: a NaN/Inf chamfer_distance must NOT pass the success
+    # check (it would otherwise look like a valid score).
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    report = '{"chamfer_distance": %s, "normalized": %s}' % (bad, bad)
+    with _patch_run(returncode=0, stdout=report):
+        res = core.compare(generated="/x/g.stl", reference="/x/r.stl")
+    assert res["success"] is False
+    assert res["chamfer_distance"] is None
+
+
+def test_compare_finite_cd_still_succeeds(monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_PYTHON", "/fake/py")
+    with _patch_run(returncode=0, stdout='{"chamfer_distance": 2.5, "normalized": 0.1}'):
+        res = core.compare(generated="/x/g.stl", reference="/x/r.stl")
+    assert res["success"] is True
+    assert res["chamfer_distance"] == 2.5
+
+
+def test_compare_module_rejects_nonpositive_samples():
+    # final-review MEDIUM: samples<=0 must error (exit 2), not produce inf/nan.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "cad_compare_script", REPO_ROOT / "scripts" / "compare.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert hasattr(mod, "_validate_samples")
+    with pytest.raises((ValueError, SystemExit)):
+        mod._validate_samples(0)
+    with pytest.raises((ValueError, SystemExit)):
+        mod._validate_samples(-5)
+    assert mod._validate_samples(4096) == 4096

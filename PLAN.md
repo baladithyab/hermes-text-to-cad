@@ -62,32 +62,48 @@ Research: CADTests (arXiv 2605.07807) shows executable per-prompt geometric asse
 
 ---
 
-## Wave 2 — Verification depth (MED)
+## Wave 2 — Verification depth (MED) — ✅ DONE (v0.3.0)
 
 **2.1 — Structured-Q&A vision gate (CADCodeVerify pattern).** Upgrade `scatter_review.py` from free-form critique to: VLM generates 2–5 Yes/No questions derived from the spec → answers each against the render with chain-of-thought → failures become the `must_fix` list. Keep cross-family (our edge over the single-model papers). Preserve the existing free-form mode behind a flag.
 - *Accept:* on a part with a known intent error (e.g. hole on wrong face), ≥2/3 reviewers' Q&A flags it; structured output parses to `{questions, answers, must_fix}`.
+- *DONE ([ADR-0005](docs/adr/0005-structured-qa-vision-gate.md)):* `scatter_review.py --mode qa|free` (default qa); `parse_reviewer()` tolerant JSON, derives `must_fix` from "no" answers, unparseable→`cant_tell` (never drops a reviewer). `core.review(mode=)` + `core.aggregate_reviews()` cluster cross-family `must_fix` by token-set **Jaccard ≥0.4** (so paraphrases from different families converge → hard must-fix; `gate_pass` only when no convergent fix AND ≥1 reviewer judged). **Proven end-to-end on a real network call:** Gemini 3.1 + Opus 4.8 + GPT-5.5 all independently flagged a solid box's missing top-face through-hole, the three paraphrases converged, and the gate failed. The Jaccard clustering replaced exact-string match precisely because the real e2e test showed models paraphrase the same fix differently.
 
 **2.2 — Chamfer-Distance similarity scoring.** For "make it like THIS" tasks where the user supplies a reference STL/STEP, add a `cad_compare` tool computing Chamfer Distance (trimesh sampling) between generated and reference meshes — straight from CAD-Coder's geometric reward. Not applicable to pure-text gen (no GT); document that.
 - *Accept:* CD≈0 for identical meshes, grows monotonically with deformation; unit test.
+- *DONE ([ADR-0006](docs/adr/0006-chamfer-distance-compare.md)):* `scripts/compare.py` symmetric CD via area-weighted `trimesh.sample.sample_surface` + scipy `cKDTree`, **seeded** (reproducible); reports raw + bbox-normalized scores; exit 2 (not a gate fail) on load error. `core.compare` + `cad_compare` tool. Identical-mesh CD is a tiny sampling-noise floor (∝ inter-sample spacing), proven monotonic with deformation (identical 1.11 → +2 mm 1.69 → +20 mm 7.94). *Deferred (documented):* no ICP alignment — compares in-frame; a correct part in a different pose scores high. ICP is the follow-up.
 
 **2.3 — Explicit CoT plan step.** Add an optional `cad_plan` tool / loop step that emits a structured modeling plan (primitives → operations → features → export) before codegen. CAD-Coder shows CoT measurably helps validity.
 - *Accept:* plan is structured JSON; integration test shows codegen consuming it.
+- *DONE ([ADR-0007](docs/adr/0007-cad-plan-cot-step.md)):* `core.plan(prompt)` → `{prompt, spec, primitives, operations, features, export, notes}`, deterministic and seeded from `derive_spec` so the plan carries the **same spec the numeric gate asserts** (plan↔gate coherence); `operations` is the agent's to fill. `cad_plan` tool. End-to-end: the plan's spec feeds a real `cad_generate` that passes the gate derived from the same prompt.
+
+## 🔒 SECURITY wave — ✅ DONE (ship-blocker, done first)
+
+`cad_generate` executes model-authored Python. Threat model + trust assumptions in [`SECURITY.md`](SECURITY.md); decisions in ADRs [0001](docs/adr/0001-scrubbed-subprocess-env.md)/[0002](docs/adr/0002-opt-in-bubblewrap-sandbox.md)/[0003](docs/adr/0003-ast-denylist-defense-in-depth.md). Three defense layers:
+- **(a) Scrubbed env (ADR-0001):** `core._scrubbed_env()` allowlist; `OPENROUTER_API_KEY` + all secrets dropped from every CAD subprocess. *Proven:* a sentinel secret in the parent env is invisible to generated code dumping `os.environ`.
+- **(c+d) AST denylist + size cap (ADR-0003):** `safety.check_code()` rejects banned imports / `eval`/`exec` / `os.system`/`os.open`/`os.rename` / writes (incl. `..` traversal) outside `CAD_OUT`, pre-exec; 100 KB cap; `HERMES_CAD_NO_AST_CHECK=1` override. *Proven:* an `import socket` blob is rejected without running; legit cadquery passes.
+- **(b) Opt-in sandbox (ADR-0002):** `HERMES_CAD_SANDBOX=1` wraps generate in bubblewrap (no net, ro-FS except `CAD_OUT`, secret dirs/files masked); firejail fallback at parity; degrade-with-warning if absent. *Proven:* under bwrap, generated code's network call is blocked and `~/.hermes/.env` + `~/.netrc` are unreadable, STL still builds.
+- **(e)** `SECURITY.md` + README trust statement; `cad doctor` reports `sandbox_available`.
+- *Hardening:* a concurrent cross-model adversarial review (6 confirmed / 33 refuted) found and fixed: file-type secrets (`.netrc`) were unmasked, the AST write-denylist missed `os.open`/move/`..`, and the firejail fallback lacked FS confinement.
 
 ---
 
-## Wave 3 — Portability & coverage (MED/LOW)
+## Wave 3 — Portability & coverage (MED/LOW) — ✅ 3.1–3.3 DONE (v0.3.0), 3.4 deferred
 
 **3.1 — Headless-portable rendering (OSMesa VTK).** Today the render gate needs a display (WSLg `:0` here; matplotlib fallback elsewhere). Add an OSMesa/EGL software-GL path so VTK renders with real occlusion on a headless server with no display. Detect and prefer in `render.py`; document in `cad doctor`.
 - *Accept:* on a box with no `DISPLAY` and no WSLg socket, `cad_render` still produces a z-buffered VTK montage (not the matplotlib fallback).
+- *DONE ([ADR-0004](docs/adr/0004-headless-render-precedence.md)):* `render.py` precedence display → OSMesa/EGL → auto private **Xvfb** (software GLX) → matplotlib. **Critical:** the stock pip `vtk` wheel is X11-only and `rw.Render()` SIGABRTs the whole process headless (uncatchable C++ abort), so the old try/except→matplotlib was unreachable on a real headless box. Now render.py probes GL in a **disposable child subprocess** (`--gl-probe`); the abort kills only the probe and the parent falls back cleanly. *Proven:* `DISPLAY=:99` (dead) → render.py exits 0 with a matplotlib montage, no crash. `cad doctor` `render_headless_gl` reports the live path. *Env note:* the OSMesa leg needs a `vtk-osmesa` build in the CAD venv (a `cad setup` concern — the stock wheel lacks it); the Xvfb leg covers the stock wheel on a real headless server (on WSL, WSLg owns `/tmp/.X11-unix` so Xvfb can't bind there, but WSLg already provides `:0`).
 
 **3.2 — Section/cutaway renders for internal features.** When the spec mentions internal channels/bores, add a clipping-plane render (VTK supports it) so hidden features are visible to the vision gate.
 - *Accept:* a part with an internal channel shows the channel in a section view; vision gate can assess it.
+- *DONE ([ADR-0009](docs/adr/0009-section-cutaway-render.md)):* `render.py --section [x|y|z]` (default auto = longest bbox axis) adds a `vtkClipPolyData` cutaway panel; `core.render(section=)`; `derive_spec` flags `internal_features` (channel/bore/cavity/hollow/passage/duct) so the agent knows to request a section. *Proven:* an internal-bore part's section montage is one panel wider (4 vs 3). The two backends were aligned to keep the same half (final-review fix).
 
 **3.3 — OpenSCAD backend path.** Wire the optional OpenSCAD backend (AppImage `--appimage-extract` for no-root installs) for CSG-style authoring + CADAM-style parameter sliders. `templates/part.scad` exists.
 - *Accept:* `cad_generate` with `backend="openscad"` produces an STL via the openscad binary; `cad doctor` reports openscad availability.
+- *DONE ([ADR-0008](docs/adr/0008-openscad-backend.md)):* `core.openscad_bin()` (HERMES_OPENSCAD_BIN → PATH → AppImage-extract paths); `generate(backend="openscad")` → STL (mesh-only, no STEP), AST check skipped (SCAD≠Python) but scrubbed env + sandbox applied; clean error (never spawns) when no binary; `cad doctor` `openscad_backend`. Unit-tested mocked; real-binary e2e skips when absent.
 
 **3.4 — Zoo/KCL organic fallback.** For freeform surfaces CadQuery/OpenSCAD choke on, add a Zoo cloud path gated on `ZOO_API_TOKEN` (surfaced at doctor-time, not install-time).
 - *Accept:* with a token set, an organic-surface prompt routes to Zoo and returns a mesh; gracefully degrades with a clear message when unset.
+- *DEFERRED:* lower priority per the directive; not started. No Zoo token available to verify the live path, and the three shipped backends (CadQuery primary, OpenSCAD CSG, plus the verification depth of Waves 1–2) cover the mechanical-parts target. Pick up with Wave 4 polish.
 
 ---
 

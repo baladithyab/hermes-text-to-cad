@@ -31,14 +31,23 @@ import json
 import argparse
 
 
+def _validate_samples(n):
+    """Sample count must be a positive int — 0/negative would sample no points
+    and yield an inf/nan distance. Raise so callers fail loudly (exit 2)."""
+    n = int(n)
+    if n <= 0:
+        raise ValueError(f"--samples must be a positive integer, got {n}")
+    return n
+
+
 def _sample_surface(mesh, n, seed):
     """N points sampled uniformly by area from a mesh surface (seeded)."""
     import numpy as np
     import trimesh
-    # trimesh.sample.sample_surface is area-weighted; seed via a local RNG for
-    # reproducibility across runs (trimesh honours numpy's global state, so we
-    # set it deterministically right before sampling).
-    np.random.seed(seed)
+    # trimesh.sample.sample_surface is area-weighted; seed via numpy's global
+    # state for reproducibility. Clamp the seed into numpy's valid uint32 range
+    # (seed+1 in chamfer_distance could otherwise exceed 2**32-1 and raise).
+    np.random.seed(int(seed) % 2**32)
     pts, _ = trimesh.sample.sample_surface(mesh, n)
     return np.asarray(pts, dtype=float)
 
@@ -53,8 +62,9 @@ def chamfer_distance(mesh_a, mesh_b, samples=4096, seed=0):
     from scipy.spatial import cKDTree
     import numpy as np
 
+    samples = _validate_samples(samples)
     a = _sample_surface(mesh_a, samples, seed)
-    b = _sample_surface(mesh_b, samples, seed + 1)  # decorrelate the two draws
+    b = _sample_surface(mesh_b, samples, (seed + 1) % 2**32)  # decorrelate the two draws
 
     tree_b = cKDTree(b)
     tree_a = cKDTree(a)
