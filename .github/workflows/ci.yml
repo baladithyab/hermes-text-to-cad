@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# The heavy CAD stack (cadquery/vtk/trimesh) lives in a separate venv that CI
+# runners don't have, so integration tests auto-skip. We force that skip
+# deterministically by pointing HERMES_CAD_PYTHON at a path that can't exist —
+# venv_ready() then returns False regardless of runner state.
+env:
+  HERMES_CAD_PYTHON: /nonexistent/cad/python
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Editable install of the dev extra. This catches packages-list drift:
+      # if pyproject's deps/extras don't actually install, this step fails.
+      - name: Install (editable, dev extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      # Contract + core unit tests only — integration is skipped (no CAD venv).
+      - name: Run unit tests
+        run: pytest tests/test_plugin_contract.py tests/test_core.py -q
+
+      # The integration suite must still *collect* and *skip* cleanly, never
+      # error, when the CAD venv is absent.
+      - name: Verify integration suite skips cleanly
+        run: pytest tests/test_integration.py -q -rs
+
+  smoke:
+    name: pre-push smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install (editable, dev extra)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      # 1. plugin contract: manifest identity + register() loads via the
+      #    package-style loader (mirrors the Hermes directory loader).
+      - name: Plugin contract smoke
+        run: |
+          python - <<'PY'
+          import importlib.util, sys, yaml
+          from pathlib import Path
+          repo = Path(".").resolve()
+          m = yaml.safe_load((repo / "plugin.yaml").read_text())
+          assert m["name"] == "hermes-text-to-cad", m["name"]
+          assert m["requires_env"] == [], "requires_env must stay empty"
+          pkg = "hermes_plugins_h2c_smoke"
+          spec = importlib.util.spec_from_file_location(
+              pkg, repo / "__init__.py", submodule_search_locations=[str(repo)])
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules[pkg] = mod
+          spec.loader.exec_module(mod)
+          assert callable(mod.register), "register() not callable"
+          print("register ok")
+          PY
+
+      # 2. full test suite (integration skips with no CAD venv)
+      - name: Test suite
+        run: pytest tests/ -q
