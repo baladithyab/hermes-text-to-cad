@@ -40,3 +40,18 @@ review track feeding findings back into the backlog.
 
 Both review teams signed off; remaining backlog (3.4, Wave 4) is explicitly
 lower-priority and documented in PLAN.md.
+
+## Run 2026-05-31 — "Steal everything" reference-uplift loop (started at d0cb9fb)
+
+Vision: level up the plugin toward CORRECTNESS + FAITHFULNESS + RENDER QUALITY
+by clean-room studying two reference CAD repos (earthtojake/text-to-cad,
+Adam-CAD/CADAM — both ALL-RIGHTS-RESERVED, so techniques/ideas only, original
+authorship) and adopting their best techniques in our style.
+
+- **Baseline:** clean tree at `d0cb9fb`; 266 passed + 1 skipped in ~/.venvs/cad.
+- **Env probe:** CAD venv py3.11 (cadquery 2.7, build123d 0.10, vtk 9.3, trimesh
+  4.12, matplotlib 3.10). node v22 present. NO pyrender/OSMesa/PyOpenGL (EGL
+  path out). WSLg `:0` socket present (VTK GLX renders in-process). masterball
+  fixture = 1.4 MB colored multi-body GLB at ~/masterball_final/.
+- **Waves:** 1 study → 2 render quality (PBR) → 3 generation correctness (spec
+  contract + self-check + geometry sanity + organic helpers) → 4 contract+pipeline.
