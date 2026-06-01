@@ -244,3 +244,37 @@ def test_generated_code_cannot_read_parent_secret(tmp_path, monkeypatch):
     # CAD_OUT is the one var we DO inject; PATH survives so the interpreter runs.
     assert dump["CAD_OUT"] == str(tmp_path)
     assert "PATH" in dump
+
+
+# ---- SECURITY (c): AST denylist, end-to-end ----------------------------------
+
+def test_socket_import_blob_is_rejected_before_running(tmp_path):
+    """ADR-0003 end-to-end: code that imports socket is rejected by the AST
+    pre-check and NEVER executed — no STL produced, structured rejection."""
+    BLOB = (
+        "import socket\n"
+        "import cadquery as cq, os\n"
+        "s = socket.socket()\n"
+        "cq.exporters.export(cq.Workplane('XY').box(10,10,10), os.path.join(os.environ['CAD_OUT'],'part.stl'))\n"
+    )
+    res = core.generate(code=BLOB, out_dir=str(tmp_path), stem="part")
+    assert res["success"] is False
+    assert res["rejected"] is True
+    assert any("socket" in v for v in res["violations"])
+    # Proof it never ran: no STL on disk despite the export line being present.
+    assert not (tmp_path / "part.stl").exists()
+
+
+def test_legit_cadquery_blob_runs_through_ast_check(tmp_path):
+    """The negative control: legit cadquery passes the AST check and builds."""
+    CODE = (
+        "import cadquery as cq, os\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        "part = cq.Workplane('XY').box(40,30,20).faces('>Z').workplane().hole(8)\n"
+        "cq.exporters.export(part, os.path.join(OUT,'part.stl'))\n"
+        "cq.exporters.export(part, os.path.join(OUT,'part.step'))\n"
+    )
+    res = core.generate(code=CODE, out_dir=str(tmp_path), stem="part")
+    assert res["success"] is True, res.get("stderr")
+    assert res.get("rejected") in (None, False)
+    assert Path(res["stl"]).exists()

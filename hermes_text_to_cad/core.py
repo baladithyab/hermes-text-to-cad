@@ -24,6 +24,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from . import safety
+
 logger = logging.getLogger(__name__)
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
@@ -380,6 +382,24 @@ def generate(code: str, out_dir: str | None = None, stem: str = "part") -> dict[
     py = cad_venv_python()
     out = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="cad_"))
     out.mkdir(parents=True, exist_ok=True)
+
+    # Layer-1 static safety pre-check (ADR-0003): reject obvious exfil/abuse
+    # BEFORE executing model-authored code. Defense-in-depth — the scrubbed env
+    # (ADR-0001) and opt-in sandbox (ADR-0002) are the real boundaries.
+    check = safety.check_code(code)
+    if not check["ok"]:
+        logger.warning("cad_generate: rejected unsafe code: %s", check["violations"])
+        return {
+            "success": False,
+            "rejected": True,
+            "violations": check["violations"],
+            "out_dir": str(out),
+            "stl": None,
+            "step": None,
+            "stdout": "",
+            "stderr": "rejected by AST safety pre-check: " + "; ".join(check["violations"]),
+        }
+
     script = out / f"{stem}_gen.py"
     script.write_text(code)
     # Scrubbed allowlist env + CAD_OUT (ADR-0001). This is the chokepoint that

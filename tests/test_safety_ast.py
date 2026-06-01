@@ -1,0 +1,190 @@
+"""SECURITY (c+d) — AST denylist + code-size cap (ADR-0003).
+
+Defense-in-depth layer 1 (the env-scrub ADR-0001 and opt-in sandbox ADR-0002 are
+the real boundaries). check_code(src) parses with `ast` and rejects obvious
+exfil/abuse BEFORE the code is executed:
+
+  - banned imports: socket, subprocess, urllib, requests, http, ftplib, smtplib,
+    ctypes, multiprocessing, pty, signal, asyncio (network/process abuse)
+  - dangerous builtins: eval, exec, compile, __import__, input
+  - os.system / os.popen / os.exec* / os.spawn* / os.fork
+  - open(..., 'w'|'a'|...) writing OUTSIDE CAD_OUT (absolute non-CAD_OUT paths)
+  - SyntaxError -> reject
+  - code-size cap (default 100 KB)
+
+Legitimate cadquery code MUST pass. The check is configurable
+(HERMES_CAD_NO_AST_CHECK=1 disables) and overridable (extend the banned set).
+
+Pure stdlib (ast) — no CAD venv needed.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from hermes_text_to_cad import safety  # noqa: E402
+
+
+# ---- legitimate code passes ----------------------------------------------------
+
+LEGIT_CADQUERY = """
+import cadquery as cq
+import os
+import math
+OUT = os.environ["CAD_OUT"]
+part = cq.Workplane("XY").box(40, 30, 20).faces(">Z").workplane().hole(8)
+cq.exporters.export(part, os.path.join(OUT, "part.stl"))
+cq.exporters.export(part, os.path.join(OUT, "part.step"))
+"""
+
+
+def test_legit_cadquery_accepted():
+    rep = safety.check_code(LEGIT_CADQUERY)
+    assert rep["ok"] is True, rep["violations"]
+    assert rep["violations"] == []
+
+
+def test_legit_open_writing_into_cad_out_accepted():
+    # Writing via os.path.join(OUT, ...) is the normal export idiom and must pass.
+    src = (
+        "import os\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        "open(os.path.join(OUT, 'log.txt'), 'w').write('ok')\n"
+    )
+    assert safety.check_code(src)["ok"] is True
+
+
+def test_relative_open_write_allowed_cwd_is_cad_out():
+    # generate() runs with cwd=CAD_OUT, so a bare relative write lands in CAD_OUT.
+    src = "open('part_notes.txt', 'w').write('hi')\n"
+    assert safety.check_code(src)["ok"] is True
+
+
+def test_read_open_always_allowed():
+    src = "data = open('/etc/hostname').read()\n"
+    # Reading is not the exfil vector the write-denylist targets; allowed.
+    assert safety.check_code(src)["ok"] is True
+
+
+# ---- banned imports rejected (the headline) ------------------------------------
+
+@pytest.mark.parametrize("mod", [
+    "socket", "subprocess", "urllib", "urllib.request", "requests",
+    "http", "http.client", "ftplib", "smtplib", "ctypes", "multiprocessing",
+    "pty", "asyncio",
+])
+def test_banned_import_rejected(mod):
+    rep = safety.check_code(f"import {mod}\n")
+    assert rep["ok"] is False
+    assert any(mod.split(".")[0] in v for v in rep["violations"])
+
+
+@pytest.mark.parametrize("stmt", [
+    "from socket import socket",
+    "from subprocess import run",
+    "from urllib.request import urlopen",
+    "import socket as s",
+])
+def test_banned_from_import_rejected(stmt):
+    assert safety.check_code(stmt + "\n")["ok"] is False
+
+
+# ---- dangerous builtins / os calls --------------------------------------------
+
+@pytest.mark.parametrize("src", [
+    "os.system('rm -rf /')",
+    "import os\nos.system('id')",
+    "os.popen('whoami')",
+    "os.execv('/bin/sh', ['sh'])",
+    "os.spawnl(os.P_WAIT, '/bin/sh')",
+    "os.fork()",
+])
+def test_os_process_calls_rejected(src):
+    assert safety.check_code(src)["ok"] is False
+
+
+@pytest.mark.parametrize("src", [
+    "eval('1+1')",
+    "exec('x=1')",
+    "__import__('socket')",
+    "compile('x', '<s>', 'eval')",
+])
+def test_dangerous_builtins_rejected(src):
+    assert safety.check_code(src)["ok"] is False
+
+
+def test_dunder_import_evasion_rejected():
+    # The classic AST-evasion attempt is itself a banned call.
+    assert safety.check_code("__import__('so'+'cket')")["ok"] is False
+
+
+# ---- open() writing outside CAD_OUT --------------------------------------------
+
+@pytest.mark.parametrize("src", [
+    "open('/etc/passwd', 'w').write('x')",
+    "open('/home/victim/.ssh/authorized_keys', 'a').write('key')",
+    "open('/tmp/evil', 'wb').write(b'x')",
+])
+def test_open_write_outside_cad_out_rejected(src):
+    assert safety.check_code(src)["ok"] is False
+
+
+def test_pathlib_write_outside_rejected():
+    src = "from pathlib import Path\nPath('/etc/evil').write_text('x')\n"
+    assert safety.check_code(src)["ok"] is False
+
+
+# ---- syntax / size -------------------------------------------------------------
+
+def test_syntax_error_rejected():
+    rep = safety.check_code("def (:\n  pass")
+    assert rep["ok"] is False
+    assert any("syntax" in v.lower() for v in rep["violations"])
+
+
+def test_code_size_cap_rejects_huge_blob():
+    huge = "x = 1\n" * 50000   # > 100 KB
+    rep = safety.check_code(huge)
+    assert rep["ok"] is False
+    assert any("size" in v.lower() or "large" in v.lower() for v in rep["violations"])
+
+
+def test_code_size_cap_is_configurable():
+    rep = safety.check_code("x = 1\n", max_bytes=2)
+    assert rep["ok"] is False
+
+
+# ---- configurability -----------------------------------------------------------
+
+def test_disabled_via_env(monkeypatch):
+    monkeypatch.setenv("HERMES_CAD_NO_AST_CHECK", "1")
+    # Even blatant abuse passes when explicitly disabled (override is the point).
+    rep = safety.check_code("import socket")
+    assert rep["ok"] is True
+    assert rep.get("skipped") is True
+
+
+def test_banned_modules_set_is_extensible():
+    # A caller can extend the banned set for their own policy.
+    rep = safety.check_code("import json", banned_modules=safety.BANNED_MODULES | {"json"})
+    assert rep["ok"] is False
+
+
+def test_report_lists_multiple_violations():
+    src = "import socket\nimport subprocess\nos.system('x')\n"
+    rep = safety.check_code(src)
+    assert rep["ok"] is False
+    assert len(rep["violations"]) >= 2
+
+
+def test_violations_have_line_numbers():
+    rep = safety.check_code("x = 1\nimport socket\n")
+    assert rep["ok"] is False
+    # line info aids the agent's fix
+    assert any("2" in v for v in rep["violations"])
