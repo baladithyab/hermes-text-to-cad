@@ -1,5 +1,5 @@
 name: hermes-text-to-cad
-version: 0.1.0
+version: 0.3.0
 manifest_version: 1
 description: "Verified text-to-CAD: generate parametric 3D models (CadQuery/OpenSCAD) with a closed loop — render, numeric gate (dims/watertight), and multi-model vision gate."
 author: "baladithyab"

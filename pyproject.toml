@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-text-to-cad"
-version = "0.1.0"
+version = "0.3.0"
 description = "Verified text-to-CAD plugin for Hermes Agent: closed-loop parametric model generation with numeric + multi-model vision gates."
 readme = "README.md"
 license = { text = "MIT" }

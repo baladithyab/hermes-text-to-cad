@@ -29,13 +29,15 @@ hole** fails the gate, a case a bbox-only check silently passes.
 
 | Tool | Step | What it does |
 |------|------|--------------|
-| `cad_spec_from_prompt` | 1 | Derive a machine-checkable geometric spec (bbox / through-holes / shells) from an NL prompt — deterministic, no model call |
-| `cad_generate` | 2 | Run CadQuery code → export STL (mesh) + STEP (manufacturing B-rep) |
-| `cad_render`   | 3 | Headless 3-view montage PNG (VTK, matplotlib fallback) |
-| `cad_measure`  | 4 | Numeric gate: measure + assert vs spec.json (`gate_pass` bool); now includes through-hole (genus) & solidity checks |
-| `cad_review`   | 5 | Cross-family vision gate (needs `OPENROUTER_API_KEY`) |
+| `cad_spec_from_prompt` | 1 | Derive a machine-checkable geometric spec (bbox / through-holes / shells / internal-features) from an NL prompt — deterministic, no model call |
+| `cad_plan` | 1.5 | Emit a structured CoT modeling plan (primitives → operations → features → export) seeded from the derived spec — optional, deterministic ([CAD-Coder](docs/adr/0007-cad-plan-cot-step.md)) |
+| `cad_generate` | 2 | Run CadQuery (→ STL + STEP) or OpenSCAD (`backend="openscad"`, → STL) modeling code. Executes model-authored code — see [Security](#️-security-cad_generate-executes-model-authored-python) |
+| `cad_render`   | 3 | Headless 3-view montage PNG (display → OSMesa → Xvfb → matplotlib precedence); `section` adds an internal-feature cutaway view |
+| `cad_measure`  | 4 | Numeric gate: measure + assert vs spec.json (`gate_pass` bool); through-hole (genus) & solidity checks |
+| `cad_compare`  | 4b | Similarity gate: Chamfer Distance vs a reference mesh for "make it like THIS" tasks |
+| `cad_review`   | 5 | Cross-family vision gate — structured Yes/No-Q&A (CADCodeVerify) by default (needs `OPENROUTER_API_KEY`) |
 
-Plus a `hermes cad` CLI: `cad doctor` (readiness) and `cad setup` (provision the CAD venv).
+Plus a `hermes cad` CLI: `cad doctor` (readiness, incl. headless-GL / sandbox / OpenSCAD detection) and `cad setup` (provision the CAD venv).
 
 ## ReAct error-feedback loop
 
@@ -121,7 +123,14 @@ layers ship by default-or-opt-in (full detail in [`SECURITY.md`](SECURITY.md)):
 
 ## Status
 
-v0.1.0 — core loop functional and verified. See [`PLAN.md`](PLAN.md) for the research-grounded improvement backlog (prompt-derived geometric tests, ReAct error-feedback, structured-Q&A vision gate, Chamfer scoring, headless-portable rendering).
+v0.3.0 — closed loop + security + verification depth + portability. Done and verified:
+**SECURITY** (scrubbed secret-free subprocess env, AST denylist, opt-in bubblewrap
+sandbox — see [`SECURITY.md`](SECURITY.md)); **Wave 1** (prompt-derived geometric
+tests, ReAct error-feedback); **Wave 2** (structured-Q&A vision gate, Chamfer-Distance
+`cad_compare`, `cad_plan` CoT step); **Wave 3** (crash-safe headless rendering,
+section/cutaway renders, OpenSCAD backend). Decisions recorded as ADRs in
+[`docs/adr/`](docs/adr/). See [`PLAN.md`](PLAN.md) for the remaining backlog
+(Wave 3.4 Zoo/KCL organic fallback, Wave 4 polish).
 
 ## Credit
 
