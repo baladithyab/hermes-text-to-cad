@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # asserts they match). Keep in sync with the register_tool calls below.
 TOOL_NAMES = (
     "cad_spec_from_prompt", "cad_plan", "cad_generate",
-    "cad_render", "cad_measure", "cad_review",
+    "cad_render", "cad_measure", "cad_compare", "cad_review",
 )
 
 
@@ -47,6 +47,11 @@ def _cad_render(args: dict, **_kw: Any) -> dict[str, Any]:
 
 def _cad_measure(args: dict, **_kw: Any) -> dict[str, Any]:
     return core.measure(stl=args["stl"], spec_path=args.get("spec_path"))
+
+
+def _cad_compare(args: dict, **_kw: Any) -> dict[str, Any]:
+    return core.compare(generated=args["generated"], reference=args["reference"],
+                        samples=args.get("samples"), seed=args.get("seed"))
 
 
 def _cad_review(args: dict, **_kw: Any) -> dict[str, Any]:
@@ -185,6 +190,32 @@ def register(ctx: Any) -> None:
                 "properties": {
                     "stl": {"type": "string", "description": "Path to the .stl file."},
                     "spec_path": {"type": "string", "description": "Path to spec.json (bbox_mm, watertight, max_shells, min/max_volume_mm3)."},
+                },
+            },
+        },
+    )
+    ctx.register_tool(
+        name="cad_compare",
+        toolset="cad",
+        handler=_cad_compare,
+        description=("Similarity gate for 'make it like THIS' tasks: compute the Chamfer "
+                     "Distance between a GENERATED mesh and a user-supplied REFERENCE mesh "
+                     "(STL/STEP/OBJ/PLY). CD~0 means identical; it grows monotonically with "
+                     "deformation (CAD-Coder's geometric reward). Reports raw + bbox-normalized "
+                     "scores. Compares meshes in their own frames (no ICP alignment yet) — not "
+                     "applicable to pure-text generation with no reference."),
+        emoji="📐",
+        schema={
+            "name": "cad_compare",
+            "description": "Chamfer Distance between a generated mesh and a reference mesh.",
+            "parameters": {
+                "type": "object",
+                "required": ["generated", "reference"],
+                "properties": {
+                    "generated": {"type": "string", "description": "Path to the generated mesh (.stl/.obj/.ply)."},
+                    "reference": {"type": "string", "description": "Path to the reference mesh to compare against."},
+                    "samples": {"type": "integer", "description": "Surface sample points per mesh (default 4096)."},
+                    "seed": {"type": "integer", "description": "RNG seed for reproducible sampling (default 0)."},
                 },
             },
         },

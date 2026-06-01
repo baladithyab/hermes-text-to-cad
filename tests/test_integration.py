@@ -346,3 +346,55 @@ def test_plan_feeds_codegen_end_to_end(tmp_path):
     spec_res = core.spec_from_prompt(prompt, out_path=str(tmp_path / "spec.json"))
     meas = core.measure(stl=gen["stl"], spec_path=spec_res["spec_path"])
     assert meas["gate_pass"] is True, meas["report"]
+
+
+# ---- Wave 2.2: Chamfer Distance, end-to-end (real geometry) ------------------
+
+def _box_stl(tmp_path, name, dims):
+    """Generate a box STL of the given dims and return its path."""
+    l, w, h = dims
+    code = (
+        "import cadquery as cq, os\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        f"cq.exporters.export(cq.Workplane('XY').box({l}, {w}, {h}), os.path.join(OUT, 'part.stl'))\n"
+    )
+    out = tmp_path / name
+    gen = core.generate(code=code, out_dir=str(out), stem="part")
+    assert gen["success"], gen.get("stderr")
+    return gen["stl"]
+
+
+def test_chamfer_near_zero_for_identical_mesh(tmp_path):
+    """ADR-0006: CD for a mesh vs itself reflects only finite-sampling noise — a
+    small floor proportional to inter-sample spacing (~sqrt(area/N)), NOT a real
+    difference. It must be tiny relative to the part size, and (next test) far
+    below any genuine deformation. More samples -> smaller floor."""
+    box = _box_stl(tmp_path, "a", (40, 30, 20))
+    res = core.compare(generated=box, reference=box, samples=16384, seed=0)
+    assert res["success"] is True, res["report"]
+    # normalized by the bbox diagonal: well under 5% of the part scale.
+    assert res["report"]["normalized"] < 0.05, res["report"]
+
+
+def test_chamfer_grows_monotonically_with_deformation(tmp_path):
+    """ADR-0006 headline: CD increases as the generated part deviates from the
+    reference. A 40x30x20 reference vs progressively taller boxes."""
+    ref = _box_stl(tmp_path, "ref", (40, 30, 20))
+    near = _box_stl(tmp_path, "near", (40, 30, 22))   # +2mm
+    far = _box_stl(tmp_path, "far", (40, 30, 40))     # +20mm
+
+    cd_self = core.compare(generated=ref, reference=ref, samples=4096)["chamfer_distance"]
+    cd_near = core.compare(generated=near, reference=ref, samples=4096)["chamfer_distance"]
+    cd_far = core.compare(generated=far, reference=ref, samples=4096)["chamfer_distance"]
+
+    assert cd_self < cd_near < cd_far, (cd_self, cd_near, cd_far)
+
+
+def test_chamfer_reports_normalized_and_directions(tmp_path):
+    ref = _box_stl(tmp_path, "r", (20, 20, 20))
+    gen = _box_stl(tmp_path, "g", (20, 20, 30))
+    rep = core.compare(generated=gen, reference=ref)["report"]
+    for k in ("chamfer_distance", "forward", "backward", "normalized", "bbox_diag_ref", "samples", "seed"):
+        assert k in rep, f"compare report missing {k}"
+    # symmetric CD = forward + backward
+    assert rep["chamfer_distance"] == pytest.approx(rep["forward"] + rep["backward"], rel=1e-3)

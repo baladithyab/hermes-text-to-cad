@@ -22,7 +22,8 @@ from jsonschema import Draft202012Validator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_TOOLS = {
-    "cad_spec_from_prompt", "cad_plan", "cad_generate", "cad_render", "cad_measure", "cad_review",
+    "cad_spec_from_prompt", "cad_plan", "cad_generate", "cad_render",
+    "cad_measure", "cad_compare", "cad_review",
 }
 
 
@@ -138,6 +139,7 @@ def test_vision_gate_declares_optional_cred(registered):
         ("cad_generate", ["code"]),
         ("cad_render", ["stl"]),
         ("cad_measure", ["stl"]),
+        ("cad_compare", ["generated", "reference"]),
         ("cad_review", ["montage", "spec_path"]),
     ],
 )

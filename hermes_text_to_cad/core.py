@@ -635,6 +635,33 @@ def review(montage: str, spec_path: str, models: str | None = None) -> dict[str,
     }
 
 
+def compare(generated: str, reference: str, samples: int | None = None,
+            seed: int | None = None) -> dict[str, Any]:
+    """Chamfer-Distance similarity between a generated and a reference mesh.
+
+    Shells out to scripts/compare.py in the CAD venv. Returns {success,
+    chamfer_distance, report}. chamfer_distance is None on a load/compute error
+    (exit 2). CD ~ 0 = identical, grows with deformation (ADR-0006).
+    """
+    py = cad_venv_python()
+    args = [py, str(SCRIPTS / "compare.py"), str(generated), str(reference)]
+    if samples is not None:
+        args += ["--samples", str(samples)]
+    if seed is not None:
+        args += ["--seed", str(seed)]
+    r = _run(args, timeout=180)
+    try:
+        report = json.loads(r.stdout)
+    except (json.JSONDecodeError, ValueError):
+        report = {"raw": r.stdout[-2000:], "stderr": r.stderr[-1000:]}
+    cd = report.get("chamfer_distance") if isinstance(report, dict) else None
+    return {
+        "success": r.returncode == 0 and cd is not None,
+        "chamfer_distance": cd,
+        "report": report,
+    }
+
+
 def doctor() -> dict[str, Any]:
     py = cad_venv_python()
     checks = []
