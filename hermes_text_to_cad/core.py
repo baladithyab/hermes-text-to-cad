@@ -231,6 +231,10 @@ _NUM_WORD_ALT = (r"a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
 _THROUGH_HOLE_RE = re.compile(
     r"(?:\b(\d+)|\b(" + _NUM_WORD_ALT + r"))?"
     r"[\s-]*"
+    # optional size spec between the count and the hole noun: a metric screw
+    # callout ("4 M3 mounting holes") or a bare diameter ("4 5mm holes",
+    # "2 Ø6 bores"). Non-capturing so the count groups (1/2) are untouched.
+    r"(?:(?:M\d+(?:x[\d.]+)?|ø\s*[\d.]+|[\d.]+\s*mm)[\s-]*)?"
     r"(?:through|thru|mounting|clearance|counterbored|countersunk|cbore|csk|bolt|drilled)?"
     r"[\s-]*(?:through[\s-]*|thru[\s-]*)?"
     r"\b(?:through[\s-]*hole|thru[\s-]*hole|bore|hole)s?\b",
@@ -258,7 +262,60 @@ _INTERNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---- SPEC CONTRACT v2 keyword detection -------------------------------------
+# Part-class -> coordinate-frame origin. The class decides where (0,0,0) sits so
+# the model places features against a frame it declared up front (the guard
+# against "supposedly correct but deformed" output):
+#   plate/bracket/flange/...   -> footprint_center  (flat parts: centre the base)
+#   cylinder/shaft/disc/...     -> axis              (axisymmetric: centre the axis)
+#   enclosure/box/cube/default -> center             (volumetric: centre the body)
+_PLATE_RE = re.compile(
+    r"\b(?:plate|bracket|flange|gusset|tab|shim|panel|lid|cover|baseplate|"
+    r"base[\s-]*plate|mounting[\s-]*plate)s?\b",
+    re.IGNORECASE,
+)
+_AXIS_RE = re.compile(
+    r"\b(?:cylinder|cylindrical|shaft|axle|rod|pin|disc|disk|ring|washer|"
+    r"spacer|bushing|bush|sleeve|tube|pipe|pulley|axisymmetric|"
+    r"revolved?|of\s+revolution)s?\b",
+    re.IGNORECASE,
+)
+# A bare diameter (Ø / "diameter" / "dia") implies an axisymmetric part too.
+_DIAMETER_RE = re.compile(r"\b(?:diameter|dia\.?|radius|ø)\b", re.IGNORECASE)
+
+# Feature keywords for the structured `features` list + the plan narrative.
+_SHELL_RE = re.compile(r"\b(?:shell(?:ed)?|hollow(?:ed)?|wall[\s-]*thickness)\b",
+                       re.IGNORECASE)
+_FILLET_RE = re.compile(r"\b(?:fillet(?:ed|s)?|round(?:ed)?(?:\s+(?:edge|corner)s?)?)\b",
+                        re.IGNORECASE)
+_CHAMFER_RE = re.compile(r"\b(?:chamfer(?:ed|s)?|bevel(?:led|ed|s)?)\b", re.IGNORECASE)
+
+# Metric screw callouts -> clearance-hole diameter (a documented assumption).
+_METRIC_SCREW_RE = re.compile(r"\bM(3|4|5)\b")
+_M_CLEARANCE_MM = {"3": 3.4, "4": 4.5, "5": 5.5}
+
+# Symmetry keywords that warrant a symmetry block even without a hole count.
+_SYMMETRIC_RE = re.compile(
+    r"\b(?:symmetric(?:al)?|mirrored|mirror|4[\s-]*corner|four[\s-]*corner)\b",
+    re.IGNORECASE,
+)
+
 DEFAULT_TOL_MM = 0.5
+
+
+def _part_class_origin(low: str) -> str:
+    """Pick the coordinate-frame origin from the part class (SPEC CONTRACT v2).
+
+    plate/bracket/flange -> 'footprint_center'; cylinder/shaft/disc/diameter ->
+    'axis'; enclosure/box/cube/default -> 'center'. Plate wins over axis when
+    both match (a flat 'disc plate' reads as a plate); axis wins over the
+    default. Pure string check — deterministic, stdlib-only.
+    """
+    if _PLATE_RE.search(low):
+        return "footprint_center"
+    if _AXIS_RE.search(low) or _DIAMETER_RE.search(low):
+        return "axis"
+    return "center"
 
 
 def derive_spec(prompt: str) -> dict[str, Any]:
@@ -315,6 +372,69 @@ def derive_spec(prompt: str) -> dict[str, Any]:
     if _INTERNAL_RE.search(low):
         spec["internal_features"] = True
 
+    # ---- SPEC CONTRACT v2 (additive) ----------------------------------------
+    # units: a constant default the gate / agent can rely on being present.
+    spec["units"] = "mm"
+
+    # intent: the cleaned prompt — the core noun phrase the user asked for. This
+    # is the over-delivery guard ("make a mug, not a vessel"): the model must
+    # build exactly THIS, not a fancier superset. Deterministic = the prompt with
+    # collapsed whitespace.
+    intent = re.sub(r"\s+", " ", text).strip()
+    spec["intent"] = intent
+
+    # coordinate_frame: declare the frame BEFORE codegen so every feature is
+    # placed against a known origin (prevents "looks right but deformed"). Origin
+    # by part class; base_plane/up_axis are the CadQuery convention.
+    origin = _part_class_origin(low)
+    spec["coordinate_frame"] = {
+        "origin": origin, "base_plane": "XY", "up_axis": "+Z",
+    }
+
+    # features: a STRUCTURED list derived from what was already detected, so the
+    # plan and gate share one vocabulary. Each entry is {name, type, count}.
+    features: list[dict[str, Any]] = []
+    th = spec.get("through_holes")
+    if th:
+        features.append({"name": "through_holes", "type": "through_hole", "count": int(th)})
+    if spec.get("internal_features"):
+        features.append({"name": "internal_feature", "type": "internal_feature", "count": 1})
+    if _SHELL_RE.search(low):
+        features.append({"name": "shell", "type": "shell", "count": 1})
+    if _FILLET_RE.search(low):
+        features.append({"name": "fillet", "type": "fillet", "count": 1})
+    if _CHAMFER_RE.search(low):
+        features.append({"name": "chamfer", "type": "chamfer", "count": 1})
+    spec["features"] = features
+
+    # assumptions: the inferred defaults made explicit so the agent (and a human
+    # reviewer) can see what was filled in. units + origin are always recorded;
+    # metric-screw callouts add the clearance-hole diameter convention.
+    assumptions: list[str] = [
+        "units assumed mm",
+        f"origin at {origin}",
+    ]
+    seen_screws: set[str] = set()
+    for sm in _METRIC_SCREW_RE.finditer(text):
+        size = sm.group(1)
+        if size in seen_screws:
+            continue
+        seen_screws.add(size)
+        assumptions.append(
+            f"M{size} clearance hole = {_M_CLEARANCE_MM[size]:g} mm"
+        )
+    spec["assumptions"] = assumptions
+
+    # symmetry: emit when count>1 holes OR an explicit symmetry keyword. `mirror`
+    # lists the planes the part should be symmetric about; for a hole pattern a
+    # rectangular footprint is mirror-symmetric about both X and Y.
+    sym_keyword = bool(_SYMMETRIC_RE.search(low))
+    if (th and th > 1) or sym_keyword:
+        spec["symmetry"] = {
+            "mirror": ["x", "y"],
+            "count": int(th) if (th and th > 1) else 1,
+        }
+
     return spec
 
 
@@ -362,13 +482,28 @@ def plan(prompt: str) -> dict[str, Any]:
     else:
         primitives.append("base solid — dimensions unspecified; pick from the prompt")
 
+    # Coordinate frame, echoed from the spec and stated up front: the model must
+    # enumerate the frame + each feature's PLACEMENT relative to it BEFORE
+    # emitting code. This ordering is what prevents output that's numerically
+    # plausible but geometrically deformed/misplaced.
+    frame = spec.get("coordinate_frame", {})
+    origin = frame.get("origin", "center")
+
     features: list[str] = []
     th = spec.get("through_holes")
     if th:
         plural = "s" if th != 1 else ""
+        # state HOW the holes sit relative to the declared frame.
+        if th > 1:
+            placement = (
+                f"place the {th} hole{plural} as a symmetric pattern about the "
+                f"{origin} (mirror across X and Y) so the part is balanced"
+            )
+        else:
+            placement = f"place the hole on-axis through the body about the {origin}"
         features.append(
             f"through_hole x{th}: {th} hole{plural} passing fully through the body "
-            f"(.faces(...).workplane().hole(d) or .cutThruAll()); "
+            f"(.faces(...).workplane().hole(d) or .cutThruAll()); {placement}; "
             f"numeric gate asserts through_holes == {th}"
         )
     if spec.get("max_shells", 1) > 1:
@@ -381,6 +516,43 @@ def plan(prompt: str) -> dict[str, Any]:
             "internal feature (channel/bore/cavity) — request a SECTION render so "
             "the vision gate can see the hidden geometry"
         )
+    for feat in spec.get("features", []):
+        if feat["type"] in ("shell", "fillet", "chamfer"):
+            features.append(
+                f"{feat['type']}: realize relative to the {origin} frame "
+                f"(keep wall/radius < the adjacent dimension or the OCC kernel fails)"
+            )
+
+    # claims_require: every claim the agent might make is bound to the TOOL whose
+    # result legitimises it — the "never claim done unless the tool ran" rule.
+    claims_require = {
+        "watertight": "cad_measure",
+        "bbox": "cad_measure",
+        "through_holes": "cad_measure",
+        "shells": "cad_measure",
+        "manifold": "cad_measure",
+        "symmetry": "cad_measure",
+        "render_exists": "cad_render",
+        "looks_right": "cad_review",
+    }
+
+    # repair_classes: map a LIKELY gate failure to the SMALLEST responsible fix,
+    # so a failed gate routes to a targeted edit instead of a rewrite. Ordered,
+    # deterministic.
+    repair_classes = [
+        {"failure": "bbox mismatch",
+         "fix": "scale the offending dimension parameter (do not rebuild the part)"},
+        {"failure": "missing through_hole",
+         "fix": "add/keep the .cutThruAll() / .hole(d) for the missing hole"},
+        {"failure": "non-manifold (not is_volume)",
+         "fix": "fix the boolean / wall thickness so the solid is watertight"},
+        {"failure": "over-large fillet/chamfer (OCC StdFail_NotDone)",
+         "fix": "reduce the fillet/chamfer radius below the adjacent edge length"},
+        {"failure": "too many shells",
+         "fix": "union the disconnected bodies (or remove the stray solid)"},
+        {"failure": "symmetry residual",
+         "fix": "centre the feature pattern on the declared origin / mirror plane"},
+    ]
 
     export = [
         "part.stl  (mesh — render + numeric gate + 3D printing)",
@@ -391,15 +563,21 @@ def plan(prompt: str) -> dict[str, Any]:
         "Agent: expand `operations` into concrete CadQuery calls (booleans, "
         "shell, fillet, patterns) that realize the `features`, then call "
         "cad_generate. Keep dimensions consistent with `spec` so the numeric "
-        "gate passes. `operations` is intentionally empty — it's yours to fill."
+        "gate passes. State the `coordinate_frame` + each feature's placement "
+        "FIRST, never claim a property without the tool in `claims_require`, and "
+        "on a gate failure apply the smallest `repair_classes` fix. "
+        "`operations` is intentionally empty — it's yours to fill."
     )
 
     return {
         "prompt": prompt,
         "spec": spec,
+        "coordinate_frame": frame,
         "primitives": primitives,
         "operations": [],   # agent fills: booleans / shell / fillet / patterns
         "features": features,
+        "claims_require": claims_require,
+        "repair_classes": repair_classes,
         "export": export,
         "notes": notes,
     }

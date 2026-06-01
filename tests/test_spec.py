@@ -98,6 +98,19 @@ def test_derive_spec_numeric_multi_hole_count():
     assert spec["through_holes"] == 12
 
 
+def test_derive_spec_count_survives_metric_screw_token():
+    # "4 M3 mounting holes" — the M3 screw callout sits between the count and the
+    # hole noun; the count must still be 4 (was 1 before the size-spec gap fix).
+    assert core.derive_spec("a 60x40x5 bracket with 4 M3 mounting holes")["through_holes"] == 4
+    assert core.derive_spec("a plate with 2 M4 clearance holes")["through_holes"] == 2
+
+
+def test_derive_spec_count_survives_diameter_token():
+    # a bare diameter between the count and the hole noun must not eat the count.
+    assert core.derive_spec("a plate with 6 5mm holes")["through_holes"] == 6
+    assert core.derive_spec("a flange with 4 Ø6 bores")["through_holes"] == 4
+
+
 def test_derive_spec_counterbored_hole_counts_as_one():
     spec = core.derive_spec("a plate with a counterbored hole")
     assert spec["through_holes"] == 1
@@ -174,6 +187,187 @@ def test_spec_from_prompt_wrapper_shape():
     assert res["success"] is True
     assert res["spec"]["bbox_mm"] == [40.0, 30.0, 20.0]
     assert res["spec"]["through_holes"] == 1
+
+
+# ==================== SPEC CONTRACT v2 — additive keys ========================
+# units / intent / coordinate_frame / features / assumptions / symmetry.
+# Each must appear when warranted and be absent/sensible when not, never break
+# the existing keys, and stay JSON-serialisable & deterministic.
+
+# ---- units -------------------------------------------------------------------
+
+def test_derive_spec_units_default_mm():
+    spec = core.derive_spec("a 40x30x20 block")
+    assert spec["units"] == "mm"
+
+
+def test_derive_spec_units_always_present():
+    # units is a constant default — present even for a dimensionless prompt.
+    assert core.derive_spec("a small widget")["units"] == "mm"
+
+
+# ---- intent (the over-delivery guard) ---------------------------------------
+
+def test_derive_spec_intent_is_cleaned_prompt():
+    # intent is the deterministic core noun phrase the user asked for — the guard
+    # against over-delivery ("make a mug, not a vessel"). It is the cleaned prompt.
+    spec = core.derive_spec("  a 40x30x20 mounting block  ")
+    assert isinstance(spec["intent"], str) and spec["intent"].strip()
+    assert "mounting block" in spec["intent"].lower()
+
+
+def test_derive_spec_intent_present_for_any_prompt():
+    assert core.derive_spec("a coffee mug")["intent"]
+
+
+def test_derive_spec_intent_is_deterministic():
+    p = "a 60x40x5 aluminium bracket with 4 M3 mounting holes"
+    assert core.derive_spec(p)["intent"] == core.derive_spec(p)["intent"]
+
+
+# ---- coordinate_frame --------------------------------------------------------
+
+def test_derive_spec_coordinate_frame_shape():
+    cf = core.derive_spec("a 40x30x20 block")["coordinate_frame"]
+    assert cf["base_plane"] == "XY"
+    assert cf["up_axis"] == "+Z"
+    assert cf["origin"] in ("center", "footprint_center", "axis")
+
+
+def test_derive_spec_frame_origin_plate_class_is_footprint_center():
+    for prompt in ("a 60x40x5 bracket", "a 100x50x8 mounting plate",
+                   "an 80x80x10 flange"):
+        cf = core.derive_spec(prompt)["coordinate_frame"]
+        assert cf["origin"] == "footprint_center", prompt
+
+
+def test_derive_spec_frame_origin_axisymmetric_class_is_axis():
+    for prompt in ("a 20mm diameter shaft", "a cylinder 30x30x50",
+                   "a disc 40x40x3", "an axisymmetric spacer"):
+        cf = core.derive_spec(prompt)["coordinate_frame"]
+        assert cf["origin"] == "axis", prompt
+
+
+def test_derive_spec_frame_origin_enclosure_class_is_center():
+    for prompt in ("a 40x30x20 enclosure", "a 10x10x10 cube",
+                   "a 50x50x50 box", "a small widget"):
+        cf = core.derive_spec(prompt)["coordinate_frame"]
+        assert cf["origin"] == "center", prompt
+
+
+# ---- features (structured list) ----------------------------------------------
+
+def test_derive_spec_features_is_a_list_of_dicts():
+    feats = core.derive_spec("a 40x30x20 plate with 4 mounting holes")["features"]
+    assert isinstance(feats, list)
+    assert all(isinstance(f, dict) for f in feats)
+    for f in feats:
+        assert {"name", "type", "count"} <= set(f)
+        assert isinstance(f["name"], str) and f["name"]
+        assert isinstance(f["count"], int)
+
+
+def test_derive_spec_features_through_hole_entry():
+    feats = core.derive_spec("a 40x30x20 plate with 4 mounting holes")["features"]
+    th = [f for f in feats if f["type"] == "through_hole"]
+    assert len(th) == 1
+    assert th[0]["count"] == 4
+
+
+def test_derive_spec_features_internal_feature_entry():
+    feats = core.derive_spec("a manifold block with an internal cooling channel")["features"]
+    assert any(f["type"] == "internal_feature" for f in feats)
+
+
+def test_derive_spec_features_shell_entry():
+    feats = core.derive_spec("a hollow box 40x40x40")["features"]
+    assert any(f["type"] == "shell" for f in feats)
+
+
+def test_derive_spec_features_fillet_and_chamfer():
+    fillet = core.derive_spec("a 40x30x20 block with rounded edges")["features"]
+    assert any(f["type"] == "fillet" for f in fillet)
+    chamfer = core.derive_spec("a 40x30x20 block with chamfered edges")["features"]
+    assert any(f["type"] == "chamfer" for f in chamfer)
+
+
+def test_derive_spec_features_empty_for_plain_solid():
+    feats = core.derive_spec("a solid 40x30x20 block")["features"]
+    assert feats == []
+
+
+# ---- assumptions -------------------------------------------------------------
+
+def test_derive_spec_assumptions_units_and_origin():
+    assumptions = core.derive_spec("a 40x30x20 enclosure")["assumptions"]
+    assert isinstance(assumptions, list)
+    joined = " ".join(assumptions).lower()
+    assert "mm" in joined           # "units assumed mm"
+    assert "origin" in joined       # "origin at <class> center"
+
+
+def test_derive_spec_assumptions_metric_screw_clearance():
+    # M3/M4/M5 -> document the clearance-hole diameter assumption.
+    a3 = " ".join(core.derive_spec("a plate with 4 M3 mounting holes")["assumptions"])
+    assert "3.4" in a3
+    a4 = " ".join(core.derive_spec("a plate with 2 M4 holes")["assumptions"])
+    assert "4.5" in a4
+    a5 = " ".join(core.derive_spec("a plate with M5 bolt holes")["assumptions"])
+    assert "5.5" in a5
+
+
+def test_derive_spec_assumptions_no_screw_clearance_when_no_metric():
+    a = " ".join(core.derive_spec("a 40x30x20 block with a hole")["assumptions"])
+    assert "3.4" not in a and "4.5" not in a and "5.5" not in a
+
+
+# ---- symmetry ----------------------------------------------------------------
+
+def test_derive_spec_symmetry_emitted_for_multi_hole():
+    sym = core.derive_spec("a 60x40x5 plate with 4 mounting holes").get("symmetry")
+    assert sym is not None
+    assert sym["count"] == 4
+    assert isinstance(sym["mirror"], list) and sym["mirror"]
+
+
+def test_derive_spec_symmetry_emitted_for_keyword():
+    sym = core.derive_spec("a symmetric bracket 60x40x5").get("symmetry")
+    assert sym is not None
+    assert all(ax in ("x", "y", "z") for ax in sym["mirror"])
+
+
+def test_derive_spec_symmetry_absent_for_single_hole():
+    spec = core.derive_spec("a 40x30x20 block with a through hole")
+    assert "symmetry" not in spec
+
+
+def test_derive_spec_symmetry_absent_for_plain_part():
+    spec = core.derive_spec("a 40x30x20 enclosure")
+    assert "symmetry" not in spec
+
+
+# ---- back-compat: all existing keys/behaviour preserved ----------------------
+
+def test_derive_spec_v2_preserves_existing_keys():
+    spec = core.derive_spec("a 40x30x20 plate with 4 mounting holes")
+    # the Wave-1 keys must still be exactly as before
+    assert spec["bbox_mm"] == [40.0, 30.0, 20.0]
+    assert spec["through_holes"] == 4
+    assert spec["watertight"] is True
+    assert spec["max_shells"] == 1
+    assert spec["tol_mm"] > 0
+    assert spec["prompt"] == "a 40x30x20 plate with 4 mounting holes"
+
+
+def test_derive_spec_v2_is_json_serialisable():
+    import json
+    spec = core.derive_spec("a 60x40x5 aluminium bracket with 4 M3 mounting holes")
+    json.loads(json.dumps(spec))   # all v2 keys round-trip with no custom types
+
+
+def test_derive_spec_v2_is_deterministic():
+    p = "a 60x40x5 aluminium bracket with 4 M3 mounting holes"
+    assert core.derive_spec(p) == core.derive_spec(p)
 
 
 # ============================ measure.gate() vocab ============================

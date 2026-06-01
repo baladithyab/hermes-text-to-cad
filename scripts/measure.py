@@ -37,6 +37,14 @@ so they are intentionally not gated here — see PLAN.md Wave 1.1 deferral note.
 """
 import sys, os, json, argparse
 
+# Ensure the sibling placement.py is importable however measure.py is loaded
+# (as a script, as the --spec CLI, or via the test module loader which does
+# spec_from_file_location without adding scripts/ to sys.path). placement is
+# pure stdlib so this import never drags in the CAD stack.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
 
 def measure(path):
     import trimesh
@@ -90,10 +98,79 @@ def measure(path):
     except Exception:
         solidity = None
 
+    # ---- placement / manifold sanity (Wave 3.x) -----------------------------
+    # The hard-won lesson: a numeric PASS (bbox/volume/watertight) does NOT mean
+    # the part is correctly PLACED or even manifold. These fields let the gate
+    # check centroid placement, symmetry, and degeneracy on top of the numbers.
+
+    # UNSORTED per-axis bbox bounds. bbox_mm/bbox_sorted above are the SIZE
+    # (sorted) — useless for axis-aligned placement, so we ALSO expose the raw
+    # min/max corners. trimesh m.bounds is [[xmin,ymin,zmin],[xmax,ymax,zmax]].
+    bbox_min = None
+    bbox_max = None
+    try:
+        b = m.bounds
+        bbox_min = [round(float(x), 3) for x in b[0].tolist()]
+        bbox_max = [round(float(x), 3) for x in b[1].tolist()]
+    except Exception:
+        bbox_min = None
+        bbox_max = None
+
+    # Per connected-component centroid (NOT only_watertight, so open shells still
+    # report a centroid). Each is the component's centre-of-mass; [] on failure.
+    body_centroids = []
+    try:
+        parts = m.split(only_watertight=False)
+        if parts is not None:
+            for p in parts:
+                try:
+                    body_centroids.append([round(float(x), 3) for x in p.center_mass.tolist()])
+                except Exception:
+                    continue
+    except Exception:
+        body_centroids = []
+
+    # Winding consistency: every shared edge traversed in opposite directions by
+    # its two faces — a prerequisite for a sane (orientable, sign-consistent)
+    # surface. trimesh exposes is_winding_consistent.
+    is_winding_consistent = None
+    try:
+        is_winding_consistent = bool(m.is_winding_consistent)
+    except Exception:
+        is_winding_consistent = None
+
+    # Degenerate faces: ~zero-area triangles (collinear/coincident verts). They
+    # bloat the mesh and confuse downstream booleans/slicers without changing the
+    # bbox or (much) the volume — exactly the kind of rot a numeric gate misses.
+    degenerate_faces = None
+    try:
+        areas = m.area_faces  # per-face area, numpy array
+        # tolerance relative to the mean face area so it scales with part size;
+        # falls back to a small absolute floor for tiny/empty meshes.
+        try:
+            mean_area = float(areas.mean()) if len(areas) else 0.0
+        except Exception:
+            mean_area = 0.0
+        thresh = max(mean_area * 1e-8, 1e-12)
+        degenerate_faces = int((areas <= thresh).sum())
+    except Exception:
+        degenerate_faces = None
+
+    # is_volume: trimesh's manifold/printable signal — watertight AND
+    # winding-consistent AND positive finite volume. The single boolean a gate
+    # can hang "manifold": true on.
+    is_volume = None
+    try:
+        is_volume = bool(m.is_volume)
+    except Exception:
+        is_volume = None
+
     return {
         "file": os.path.basename(path),
         "bbox_mm": [round(x, 3) for x in ext],
         "bbox_sorted": [round(x, 3) for x in sorted(ext)],
+        "bbox_min": bbox_min,
+        "bbox_max": bbox_max,
         "watertight": bool(m.is_watertight),
         "volume_mm3": round(float(m.volume), 3),
         "area_mm2": round(float(m.area), 3),
@@ -105,6 +182,10 @@ def measure(path):
         "genus": genus,
         "through_holes": through_holes,
         "solidity": solidity,
+        "body_centroids": body_centroids,
+        "is_winding_consistent": is_winding_consistent,
+        "degenerate_faces": degenerate_faces,
+        "is_volume": is_volume,
     }
 
 
@@ -161,6 +242,84 @@ def gate(meas, spec):
     if "max_solidity" in spec and meas.get("solidity") is not None:
         add("max_solidity", meas["solidity"] <= spec["max_solidity"],
             {"solidity": meas["solidity"], "max": spec["max_solidity"]})
+
+    # ---- placement / manifold sanity (Wave 3.x) -----------------------------
+    # "numeric-PASS != correct placement" — these go beyond bbox/volume to assert
+    # the part is manifold, free of degenerate faces, and actually CENTRED /
+    # PLACED where the spec says. Each is ADDITIVE: skipped silently when the
+    # spec key OR the needed measured field is absent, so the existing checks
+    # (and tests/test_spec.py) are never touched. The placement math lives in the
+    # pure scripts/placement.py so it stays trimesh-free and unit-testable.
+    import placement  # pure stdlib; sibling dir is on sys.path (module top)
+
+    # manifold: trimesh is_volume — watertight + winding-consistent + positive
+    # volume. The single boolean that says "this is a real printable solid".
+    if spec.get("manifold") and meas.get("is_volume") is not None:
+        add("manifold", meas["is_volume"] is True, {"is_volume": meas["is_volume"]})
+
+    if "max_degenerate_faces" in spec and meas.get("degenerate_faces") is not None:
+        add("max_degenerate_faces",
+            meas["degenerate_faces"] <= spec["max_degenerate_faces"],
+            {"degenerate_faces": meas["degenerate_faces"],
+             "max": spec["max_degenerate_faces"]})
+
+    # placement tolerance: explicit placement_tol_mm, else reuse the bbox tol_mm,
+    # else a forgiving 0.5 mm default.
+    place_tol = spec.get("placement_tol_mm", spec.get("tol_mm", 0.5))
+
+    # symmetry: for each requested axis, the centroid must lie on the symmetry
+    # plane (= the bbox-centre on that axis) within tolerance. Needs the UNSORTED
+    # bbox bounds so we check the RIGHT axis (never the sorted size).
+    if ("symmetry" in spec
+            and meas.get("center_mass") is not None
+            and meas.get("bbox_min") is not None
+            and meas.get("bbox_max") is not None):
+        # Accept BOTH spec shapes: the bare list ["x","y"] AND the structured form
+        # derive_spec actually emits, {"mirror": ["x","y"], "count": N}. Passing the
+        # dict straight to symmetry_residual() would iterate its KEYS ('mirror',
+        # 'count') — neither a valid axis — yielding an empty residual that ALWAYS
+        # passes (the silent-vacuous bug an adversarial review caught: a part whose
+        # centroid drifted off the symmetry plane sailed through). Extract the axes.
+        sym = spec["symmetry"]
+        axes = sym.get("mirror", []) if isinstance(sym, dict) else sym
+        residual = placement.symmetry_residual(
+            meas["center_mass"], meas["bbox_min"], meas["bbox_max"], axes)
+        worst = max(residual.values()) if residual else 0.0
+        # An empty axis list (e.g. {"mirror": []}) means "no symmetry asserted" —
+        # skip rather than vacuously pass.
+        if residual:
+            add("symmetry", worst <= place_tol,
+                {"residual": {k: round(v, 4) for k, v in residual.items()},
+                 "worst": round(worst, 4), "tol_mm": place_tol})
+
+    # expect_centroid: the whole-part centre-of-mass must be within tolerance
+    # (Euclidean) of an expected point.
+    if "expect_centroid" in spec and meas.get("center_mass") is not None:
+        exp = [float(x) for x in spec["expect_centroid"]]
+        dist = placement._dist(meas["center_mass"], exp)
+        add("expect_centroid", dist <= place_tol,
+            {"expected": exp, "measured": meas["center_mass"],
+             "dist": round(dist, 4), "tol_mm": place_tol})
+
+    # expect_bodies: greedily match each expected body centroid to a measured
+    # body centroid; every expected body must find a free measured body within
+    # its own tol. Catches a missing/extra/misplaced body that bbox can't see.
+    if "expect_bodies" in spec and meas.get("body_centroids") is not None:
+        expected = [list(b.get("centroid", [])) for b in spec["expect_bodies"]]
+        tols = [float(b.get("tol", place_tol)) for b in spec["expect_bodies"]]
+        matches = placement.match_bodies(meas["body_centroids"], expected)
+        per_body = []
+        ok = True
+        for m_ in matches:
+            ei = m_["expected_index"]
+            d = m_["dist"]
+            within = (d is not None) and (d <= tols[ei])
+            ok = ok and within
+            per_body.append({"expected_index": ei,
+                             "measured_index": m_["measured_index"],
+                             "dist": (round(d, 4) if d is not None else None),
+                             "tol": tols[ei], "matched": within})
+        add("expect_bodies", ok, {"bodies": per_body})
 
     return checks
 

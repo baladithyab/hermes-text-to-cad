@@ -95,3 +95,79 @@ def test_plan_from_prompt_writes_file(tmp_path):
     assert res["plan_path"] == str(out)
     written = json.loads(out.read_text())
     assert written["spec"]["bbox_mm"] == [40.0, 30.0, 20.0]
+
+
+# ==================== PLAN v2 — self-check enrichment =========================
+# coordinate_frame echo + feature-placement narrative + claims_require +
+# repair_classes. The plan now enumerates frame + placement BEFORE codegen
+# (prevents "supposedly correct but deformed" output), and binds every claim to
+# the tool that legitimises it (never claim done unless the tool ran).
+
+def test_plan_v2_has_new_sections():
+    plan = core.plan("a 60x40x5 plate with 4 mounting holes")
+    for key in ("coordinate_frame", "claims_require", "repair_classes"):
+        assert key in plan, f"plan missing {key}"
+
+
+def test_plan_echoes_coordinate_frame_from_spec():
+    p = "a 60x40x5 mounting plate"
+    plan = core.plan(p)
+    assert plan["coordinate_frame"] == core.derive_spec(p)["coordinate_frame"]
+    assert plan["coordinate_frame"]["origin"] == "footprint_center"
+
+
+def test_plan_feature_placement_narrative_references_frame():
+    # Each feature's narrative must state HOW it is placed relative to the frame.
+    plan = core.plan("a 60x40x5 plate with 4 mounting holes")
+    joined = " ".join(plan["features"]).lower()
+    # the placement story names the frame origin and the count
+    assert "footprint_center" in joined or "origin" in joined
+    assert "4" in joined
+
+
+def test_plan_claims_require_maps_claims_to_tools():
+    plan = core.plan("a 40x30x20 block with a through hole")
+    cr = plan["claims_require"]
+    assert isinstance(cr, dict)
+    # the contract's named bindings
+    assert cr["watertight"] == "cad_measure"
+    assert cr["bbox"] == "cad_measure"
+    assert cr["through_holes"] == "cad_measure"
+    assert cr["render_exists"] == "cad_render"
+    assert cr["looks_right"] == "cad_review"
+
+
+def test_plan_repair_classes_map_failure_to_smallest_fix():
+    plan = core.plan("a 40x30x20 block with a through hole")
+    rc = plan["repair_classes"]
+    # a list of {failure, fix} mappings, deterministic
+    assert isinstance(rc, list) and rc
+    for entry in rc:
+        assert {"failure", "fix"} <= set(entry)
+        assert isinstance(entry["failure"], str) and entry["failure"]
+        assert isinstance(entry["fix"], str) and entry["fix"]
+    blob = json.dumps(rc).lower()
+    # the headline repair classes from the contract
+    assert "bbox" in blob and "scale" in blob
+    assert "through" in blob
+    assert "manifold" in blob or "non-manifold" in blob
+    assert "fillet" in blob
+
+
+def test_plan_v2_preserves_existing_sections():
+    plan = core.plan("a 40x30x20 block with a through hole")
+    for key in ("prompt", "spec", "primitives", "operations", "features",
+                "export", "notes"):
+        assert key in plan
+    # operations stays the agent's to fill
+    assert plan["operations"] == []
+
+
+def test_plan_v2_is_json_serialisable():
+    plan = core.plan("a 60x40x5 aluminium bracket with 4 M3 mounting holes")
+    json.loads(json.dumps(plan))   # all v2 sections round-trip
+
+
+def test_plan_v2_is_deterministic():
+    p = "a 60x40x5 aluminium bracket with 4 M3 mounting holes"
+    assert core.plan(p) == core.plan(p)
