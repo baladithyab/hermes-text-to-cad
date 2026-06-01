@@ -55,3 +55,24 @@ authorship) and adopting their best techniques in our style.
   fixture = 1.4 MB colored multi-body GLB at ~/masterball_final/.
 - **Waves:** 1 study → 2 render quality (PBR) → 3 generation correctness (spec
   contract + self-check + geometry sanity + organic helpers) → 4 contract+pipeline.
+
+### Result
+- **Commit range:** `d0cb9fb..` on `master`, pushed to origin. Waves:
+  `13d2f7b` (U1 study) → `9832054` (U2 PBR render, ADR-0010) → `bbb4957` (U3 spec
+  v2 + placement gate + helpers, ADR-0011/0012) → `78c1ed9` (U4 generator contract
+  GLB+sidecar, ADR-0013) → final-review fixes (section tool wiring + license docs).
+- **Tests:** 266 → 409 pass + 1 skip (CAD venv); clean-env auto-skips integration;
+  87 security tests green; plugin registers 7 tools; core stays stdlib-only.
+- **Concurrent adversarial review every wave** (Codex-style cross-checks): U2 found
+  2 MED (section rainbow-LUT, silent-blank GLB) → fixed; U3 found 1 HIGH (symmetry
+  gate vacuous on the dict spec derive_spec emits) → fixed + seam-tested; U4 SHIP
+  with 2 LOW (export stem path, corrupt-GLB kept) → fixed. Final cross-wave pass:
+  license-guard CLEAN (14 files, no lifts), evidence all-green, 1 MED (section
+  render unreachable through the cad_render tool) → wired + tested, 2 LOW license
+  doc corrections (MIT/GPL-3.0 labels; replaced a GPL-traced idiom).
+- **Render before/after proven on the real masterball.glb:** flat mono-blue STL
+  montage → PBR studio with all 8 per-body colors + specular + soft shadows.
+- **Pipeline proven end-to-end:** colored cq.Assembly → kept GLB → PBR render
+  shows per-body color; topology sidecar = authoritative STL geometry + distinct
+  render-color manifest. Section/cutaway reachable through the tool surface.
+- Both review tracks signed off; clean-room license discipline held (MIT repo).

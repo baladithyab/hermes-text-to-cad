@@ -145,3 +145,42 @@ def test_vision_gate_declares_optional_cred(registered):
 )
 def test_tool_required_args(registered, tool, required):
     assert _params(registered.tools[tool]).get("required", []) == required
+
+
+# ---- cad_render exposes + forwards the section arg (final-review fix) ---------
+# A prior gap: cad_render's schema had only `stl`, so an agent driving the loop
+# through the registered tools could never trigger the section/cutaway render
+# (ADR-0009) even when cad_plan instructed it to. These lock the wiring.
+
+def test_cad_render_schema_exposes_section(registered):
+    props = _params(registered.tools["cad_render"])["properties"]
+    assert "section" in props, "cad_render must expose `section` (cutaway view)"
+    assert "spec_path" in props, "cad_render should accept spec_path for auto-section"
+
+
+def test_cad_render_handler_forwards_section(registered, monkeypatch, plugin):
+    captured = {}
+    monkeypatch.setattr(plugin.core, "render",
+                        lambda stl, section=None: captured.update(stl=stl, section=section) or {"ok": True})
+    handler = registered.tools["cad_render"]["handler"]
+    handler({"stl": "/tmp/part.stl", "section": "z"})
+    assert captured == {"stl": "/tmp/part.stl", "section": "z"}
+
+
+def test_cad_render_auto_section_from_internal_features(registered, monkeypatch, plugin, tmp_path):
+    # a spec with internal_features=true and no explicit section -> auto cutaway
+    import json
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"internal_features": True}))
+    captured = {}
+    monkeypatch.setattr(plugin.core, "render",
+                        lambda stl, section=None: captured.update(section=section) or {"ok": True})
+    registered.tools["cad_render"]["handler"]({"stl": "/tmp/p.stl", "spec_path": str(spec)})
+    assert captured["section"] is True   # auto-enabled from the spec
+
+    # a spec WITHOUT internal_features -> no section
+    spec2 = tmp_path / "plain.json"
+    spec2.write_text(json.dumps({"bbox_mm": [10, 10, 10]}))
+    captured.clear()
+    registered.tools["cad_render"]["handler"]({"stl": "/tmp/p.stl", "spec_path": str(spec2)})
+    assert captured["section"] is None

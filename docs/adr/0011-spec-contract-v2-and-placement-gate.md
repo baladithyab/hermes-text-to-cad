@@ -41,8 +41,9 @@ Chosen: **option 2**, keeping the whole contract deterministic and LLM-free
 (the agent fills `operations`; `core` only asserts), consistent with ADR-0007.
 
 **Spec contract v2** — `derive_spec` additively emits (only when warranted):
-`units`, `intent` (the cleaned prompt — an *over-delivery* guard, "make a mug,
-not an elaborate vessel"), `coordinate_frame` (origin chosen by part class:
+`units`, `intent` (the cleaned prompt — an *over-delivery* guard: build exactly
+the part asked for, not an embellished superset), `coordinate_frame` (origin
+chosen by part class:
 plate/bracket/flange → footprint_center; cylinder/shaft/disc → axis; enclosure/
 box/default → center), a structured `features` list (`{name,type,count}`),
 `assumptions` (units + origin always; M3/M4/M5 → 3.4/4.5/5.5 mm clearance), and

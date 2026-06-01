@@ -44,7 +44,20 @@ def _cad_generate(args: dict, **_kw: Any) -> dict[str, Any]:
 
 
 def _cad_render(args: dict, **_kw: Any) -> dict[str, Any]:
-    return core.render(stl=args["stl"])
+    # section: True (auto axis), 'x'|'y'|'z' (explicit), or omitted/False (none).
+    # If a spec_path with internal_features=true is given and section is unset,
+    # auto-enable a cutaway — "core decides from the spec" (ADR-0009), so an
+    # internal-feature part the vision gate can't see from outside gets a section.
+    section = args.get("section")
+    if section is None and args.get("spec_path"):
+        try:
+            import json
+            spec = json.load(open(args["spec_path"]))
+            if spec.get("internal_features"):
+                section = True
+        except (OSError, ValueError):
+            section = None
+    return core.render(stl=args["stl"], section=section)
 
 
 def _cad_measure(args: dict, **_kw: Any) -> dict[str, Any]:
@@ -171,17 +184,24 @@ def register(ctx: Any) -> None:
         name="cad_render",
         toolset="cad",
         handler=_cad_render,
-        description=("Render an STL into a 3-view (front/top/iso) montage PNG, headless. Uses "
-                     "VTK via a display when available, falls back to matplotlib. Step 3 — "
-                     "the input to the vision gate."),
+        description=("Render a part into a 3-view (front/top/iso) montage PNG, headless, with PBR "
+                     "studio lighting (per-body color when a sibling <stem>.glb exists; ADR-0010). "
+                     "Pass the STL — render prefers the .glb beside it. section=true adds an "
+                     "internal-feature CUTAWAY view (auto axis = longest edge), or 'x'|'y'|'z' to "
+                     "pick the cut axis; if a spec_path with internal_features is given and section "
+                     "is unset, a cutaway is auto-enabled. Step 3 — the input to the vision gate."),
         emoji="🖼️",
         schema={
             "name": "cad_render",
-            "description": "STL -> 3-view montage PNG (headless).",
+            "description": "Part -> PBR 3-view montage PNG (headless); optional internal-feature section/cutaway.",
             "parameters": {
                 "type": "object",
                 "required": ["stl"],
-                "properties": {"stl": {"type": "string", "description": "Path to the .stl file."}},
+                "properties": {
+                    "stl": {"type": "string", "description": "Path to the .stl file (a sibling .glb, if present, is used for per-body color)."},
+                    "section": {"type": ["boolean", "string"], "enum": [True, False, "x", "y", "z"], "description": "Add an internal-feature cutaway view: true = auto axis (longest bbox edge), 'x'|'y'|'z' = explicit cut axis, false/omitted = none."},
+                    "spec_path": {"type": "string", "description": "Optional spec.json; if it has internal_features=true and section is unset, a cutaway is auto-enabled."},
+                },
             },
         },
     )

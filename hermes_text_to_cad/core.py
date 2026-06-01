@@ -377,9 +377,9 @@ def derive_spec(prompt: str) -> dict[str, Any]:
     spec["units"] = "mm"
 
     # intent: the cleaned prompt — the core noun phrase the user asked for. This
-    # is the over-delivery guard ("make a mug, not a vessel"): the model must
-    # build exactly THIS, not a fancier superset. Deterministic = the prompt with
-    # collapsed whitespace.
+    # is the over-delivery guard (build exactly what was asked — a plain bracket,
+    # not an embellished decorative fixture): the model must build THIS, not a
+    # fancier superset. Deterministic = the prompt with collapsed whitespace.
     intent = re.sub(r"\s+", " ", text).strip()
     spec["intent"] = intent
 
