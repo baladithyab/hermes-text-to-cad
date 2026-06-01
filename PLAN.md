@@ -123,3 +123,20 @@ pytest tests/ -q
 - README install flow verified end-to-end on a clean machine.
 - CI green. Tagged release v0.2.0 (waves 1–2) / v0.3.0 (wave 3) / v1.0.0 (wave 4).
 - No item deferred without a one-line justification in this doc.
+
+---
+
+## ADDENDUM — concurrent cross-family review findings (2026-05-31)
+
+Three independent reviewers (Gemini 3.1 Pro / GPT-5.5 / Grok 4.3) reviewed the v0.1.0 scaffold. P0s flagged on the original `register()` (wrong PluginContext API) were verified against live Hermes source and **already fixed** in `__init__.py` (correct `register_tool(name, toolset, schema, handler, ...)`, `register_cli_command(name, help, setup_fn, handler_fn)`, relative import, `args`-dict handlers). README install order, `generate()` cwd, STL-non-empty check, and pyproject heavy-deps→extras are also fixed. Remaining items folded into the waves below:
+
+- **[Wave 0/1.2] measure exit-code disambiguation (Gemini P1):** `measure.py` exit 1 currently means BOTH "gate failed" and could mask a real crash. Standardize: `0`=gate pass, `2`=gate fail, `1`/other=script/kernel crash (so `core.measure` can distinguish a failed gate from a segfault). Update `core.measure`'s `gate_pass`/`success` mapping and add a test.
+- **[Wave 1.1 — sharpen] CADTests = EXECUTABLE assertions, not just a static spec.json (Gemini P1, convergent with the paper):** the strongest form has the LLM emit *executable Python test functions* that run against the B-rep/mesh and assert topological/dimensional facts, not only a fixed-vocabulary JSON. Support BOTH: the JSON spec for common cases AND an optional `cad_test` tool that runs LLM-authored assertion functions in the CAD venv (sandboxed — see below). This is the real CADTests signal.
+- **[Wave 0/4 — SECURITY P0, Grok+Gemini convergent] `cad_generate` runs arbitrary LLM Python with full env+FS+network.** Add to the backlog as a NAMED security wave (do NOT ship to wide install without it): (a) run generate/test subprocesses with a minimal scrubbed env (drop unrelated secrets — do NOT inherit full `os.environ`), (b) add an opt-in sandbox path (bubblewrap/firejail/`-I` no-network) gated by config, (c) a code-size cap and an AST denylist for `os.system`/`socket`/`subprocess`/`open(... 'w')` outside CAD_OUT as a cheap first line. Document the threat model in SECURITY.md. **Until sandboxing lands, README must state the trust assumption clearly.**
+- **[Wave 0] async dispatch (Gemini P0-ish):** wrap the long subprocess calls so a 300s generate/setup doesn't block the agent loop. Either mark the tools `is_async=True` and use `asyncio.create_subprocess_exec`, or confirm Hermes dispatches sync tool handlers on a thread (check `model_tools.handle_function_call`); add a test for whichever path.
+- **[Wave 3.1] scrubbed-env + no-network for render/measure too**, not just generate.
+- **[Wave 4] profile-aware `~/.hermes/.env` resolution (GPT P2):** `_has_openrouter_key` and `scatter_review.py` hard-code `~/.hermes/.env`; honor the active Hermes profile's env path.
+- **[Wave 4] Windows venv layout (GPT P2):** `core.setup`/`cad_venv_python` hardcode POSIX `bin/python`; either handle `Scripts\python.exe` or drop `windows` from `plugin.yaml platforms`.
+- **[Wave 0] error-swallowing (Grok P1):** broad `except` in `measure`/`render` parsing must log at WARNING with context, never hide a crash as truncated raw output (per the plugin-authoring `logger.debug`-hides-bugs rule).
+
+**Three things the reviewers confirmed RIGHT:** (1) the venv-subprocess isolation of the CAD stack, (2) the dual-gate closed loop (numeric precision + vision intent), (3) `requires_env: []` + doctor-time credential surfacing for graceful UX.

@@ -10,30 +10,35 @@ import json
 import logging
 from typing import Any
 
-from hermes_text_to_cad import core
+# Directory plugins load as hermes_plugins.<slug> with submodule_search_locations
+# set to the plugin dir, so a RELATIVE import is the correct way to reach the
+# sibling package (absolute `from hermes_text_to_cad import core` is not on sys.path).
+from .hermes_text_to_cad import core
 
 logger = logging.getLogger(__name__)
 
 
-# ---- tool handlers (return dicts; the loader JSON-encodes) -------------------
+# ---- tool handlers --------------------------------------------------------
+# Hermes dispatch calls handlers as handler(args: dict, **kwargs) and JSON-encodes
+# the returned dict. So each handler unpacks from the args dict.
 
-def _cad_generate(code: str, out_dir: str | None = None, stem: str = "part") -> dict[str, Any]:
-    return core.generate(code=code, out_dir=out_dir, stem=stem)
-
-
-def _cad_render(stl: str) -> dict[str, Any]:
-    return core.render(stl=stl)
+def _cad_generate(args: dict, **_kw: Any) -> dict[str, Any]:
+    return core.generate(code=args["code"], out_dir=args.get("out_dir"), stem=args.get("stem", "part"))
 
 
-def _cad_measure(stl: str, spec_path: str | None = None) -> dict[str, Any]:
-    return core.measure(stl=stl, spec_path=spec_path)
+def _cad_render(args: dict, **_kw: Any) -> dict[str, Any]:
+    return core.render(stl=args["stl"])
 
 
-def _cad_review(montage: str, spec_path: str, models: str | None = None) -> dict[str, Any]:
-    return core.review(montage=montage, spec_path=spec_path, models=models)
+def _cad_measure(args: dict, **_kw: Any) -> dict[str, Any]:
+    return core.measure(stl=args["stl"], spec_path=args.get("spec_path"))
 
 
-# ---- CLI: `hermes cad <subcommand>` -----------------------------------------
+def _cad_review(args: dict, **_kw: Any) -> dict[str, Any]:
+    return core.review(montage=args["montage"], spec_path=args["spec_path"], models=args.get("models"))
+
+
+# ---- CLI: `hermes cad <subcommand>` --------------------------------------
 
 def _cli_cad(args) -> int:
     sub = getattr(args, "cad_subcommand", None)
@@ -50,75 +55,106 @@ def _cli_cad(args) -> int:
 
 
 def _setup_cli(parser) -> None:
-    parser.set_defaults(_handler=_cli_cad)
     sp = parser.add_subparsers(dest="cad_subcommand")
     sp.add_parser("doctor", help="Check CAD venv, render display, vision-gate key")
     sp.add_parser("setup", help="Provision the ~/.venvs/cad venv (uv preferred)")
 
 
-# ---- register ----------------------------------------------------------------
+# ---- register -------------------------------------------------------------
 
 def register(ctx: Any) -> None:
     ctx.register_tool(
         name="cad_generate",
-        fn=_cad_generate,
+        toolset="cad",
+        handler=_cad_generate,
         description=("Execute CadQuery Python code to build a parametric 3D model. The code "
-                     "must export <stem>.stl and <stem>.step into the CAD_OUT directory. "
-                     "Returns paths to the STL (mesh, for render/measure/print) and STEP "
-                     "(B-rep, for manufacturing). Step 2 of the closed CAD loop."),
+                     "must export <stem>.stl and <stem>.step into the CAD_OUT directory "
+                     "(read it from os.environ['CAD_OUT']). Returns paths to the STL (mesh, "
+                     "for render/measure/print) and STEP (B-rep, for manufacturing). Step 2 "
+                     "of the closed CAD loop."),
+        emoji="📐",
         schema={
-            "type": "object",
-            "required": ["code"],
-            "properties": {
-                "code": {"type": "string", "description": "CadQuery Python source; exports STL+STEP into CAD_OUT (env)."},
-                "out_dir": {"type": "string", "description": "Output dir; temp dir if omitted."},
-                "stem": {"type": "string", "description": "Filename stem (default 'part')."},
+            "name": "cad_generate",
+            "description": "Run CadQuery code -> STL + STEP (exports into $CAD_OUT).",
+            "parameters": {
+                "type": "object",
+                "required": ["code"],
+                "properties": {
+                    "code": {"type": "string", "description": "CadQuery Python source; exports STL+STEP into os.environ['CAD_OUT']."},
+                    "out_dir": {"type": "string", "description": "Output dir; temp dir if omitted."},
+                    "stem": {"type": "string", "description": "Filename stem (default 'part')."},
+                },
             },
         },
     )
     ctx.register_tool(
         name="cad_render",
-        fn=_cad_render,
+        toolset="cad",
+        handler=_cad_render,
         description=("Render an STL into a 3-view (front/top/iso) montage PNG, headless. Uses "
                      "VTK via a display when available, falls back to matplotlib. Step 3 — "
                      "the input to the vision gate."),
+        emoji="🖼️",
         schema={
-            "type": "object",
-            "required": ["stl"],
-            "properties": {"stl": {"type": "string", "description": "Path to the .stl file."}},
+            "name": "cad_render",
+            "description": "STL -> 3-view montage PNG (headless).",
+            "parameters": {
+                "type": "object",
+                "required": ["stl"],
+                "properties": {"stl": {"type": "string", "description": "Path to the .stl file."}},
+            },
         },
     )
     ctx.register_tool(
         name="cad_measure",
-        fn=_cad_measure,
+        toolset="cad",
+        handler=_cad_measure,
         description=("Numeric gate: measure an STL (bbox, watertight, volume, shells) and assert "
                      "against a spec JSON. gate_pass=True only if all checks pass. Carries the "
                      "PRECISION load of verification — vision cannot judge exact dims. Step 4."),
+        emoji="📏",
         schema={
-            "type": "object",
-            "required": ["stl"],
-            "properties": {
-                "stl": {"type": "string", "description": "Path to the .stl file."},
-                "spec_path": {"type": "string", "description": "Path to spec.json (bbox_mm, watertight, max_shells, min/max_volume_mm3)."},
+            "name": "cad_measure",
+            "description": "Numeric gate: measure + assert STL vs spec.json.",
+            "parameters": {
+                "type": "object",
+                "required": ["stl"],
+                "properties": {
+                    "stl": {"type": "string", "description": "Path to the .stl file."},
+                    "spec_path": {"type": "string", "description": "Path to spec.json (bbox_mm, watertight, max_shells, min/max_volume_mm3)."},
+                },
             },
         },
     )
     ctx.register_tool(
         name="cad_review",
-        fn=_cad_review,
+        toolset="cad",
+        handler=_cad_review,
         description=("Qualitative gate: cross-family multi-model VISION review of the render montage "
                      "against the spec (intent match, feature presence/placement, defects). Needs "
                      "OPENROUTER_API_KEY. Catches intent errors the numeric gate cannot. Step 5."),
+        emoji="👁️",
+        requires_env=["OPENROUTER_API_KEY"],
         schema={
-            "type": "object",
-            "required": ["montage", "spec_path"],
-            "properties": {
-                "montage": {"type": "string", "description": "Path to the 3-view montage PNG."},
-                "spec_path": {"type": "string", "description": "Path to spec.json."},
-                "models": {"type": "string", "description": "Optional comma-separated model slugs (default: gemini/opus/gpt cross-family)."},
+            "name": "cad_review",
+            "description": "Cross-family vision gate over the render montage vs spec.",
+            "parameters": {
+                "type": "object",
+                "required": ["montage", "spec_path"],
+                "properties": {
+                    "montage": {"type": "string", "description": "Path to the 3-view montage PNG."},
+                    "spec_path": {"type": "string", "description": "Path to spec.json."},
+                    "models": {"type": "string", "description": "Optional comma-separated model slugs (default: gemini/opus/gpt cross-family)."},
+                },
             },
         },
     )
 
-    ctx.register_cli_command("cad", _setup_cli)
+    ctx.register_cli_command(
+        "cad",
+        help="Verified text-to-CAD: setup the CAD venv and check readiness",
+        setup_fn=_setup_cli,
+        handler_fn=_cli_cad,
+        description="hermes-text-to-cad plugin CLI",
+    )
     logger.info("hermes-text-to-cad: registered 4 tools + `cad` CLI")

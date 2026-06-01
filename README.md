@@ -36,15 +36,15 @@ Plus a `hermes cad` CLI: `cad doctor` (readiness) and `cad setup` (provision the
 # 1. Install the plugin (clones into ~/.hermes/plugins/hermes-text-to-cad/)
 hermes plugins install baladithyab/hermes-text-to-cad
 
-# 2. Provision the CAD venv (CadQuery + trimesh + vtk + ... via uv, no root needed)
+# 2. Enable it + restart the gateway so the `hermes cad` CLI registers
+hermes plugins enable hermes-text-to-cad
+hermes gateway restart      # or start a fresh `hermes` CLI session
+
+# 3. Provision the CAD venv (CadQuery + trimesh + vtk + ... via uv, no root needed)
 hermes cad setup
 #   — or manually:
 #   uv venv ~/.venvs/cad --python 3.11
 #   uv pip install --python ~/.venvs/cad/bin/python cadquery trimesh scipy numpy vtk matplotlib pillow
-
-# 3. Enable + restart the gateway (plugins load at startup)
-hermes plugins enable hermes-text-to-cad
-hermes gateway restart      # or start a fresh `hermes` CLI session
 
 # 4. Verify
 hermes cad doctor

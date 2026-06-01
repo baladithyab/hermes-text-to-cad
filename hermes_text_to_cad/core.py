@@ -61,14 +61,17 @@ def generate(code: str, out_dir: str | None = None, stem: str = "part") -> dict[
     script = out / f"{stem}_gen.py"
     script.write_text(code)
     env = dict(os.environ, CAD_OUT=str(out))
-    r = subprocess.run([py, str(script)], capture_output=True, text=True, timeout=300, env=env)
+    # cwd=out so scripts that export with bare local names still land in CAD_OUT.
+    r = subprocess.run([py, str(script)], capture_output=True, text=True,
+                       timeout=300, env=env, cwd=str(out))
     stl = out / f"{stem}.stl"
     step = out / f"{stem}.step"
+    stl_ok = stl.exists() and stl.stat().st_size > 0
     return {
-        "success": r.returncode == 0 and stl.exists(),
+        "success": r.returncode == 0 and stl_ok,
         "out_dir": str(out),
-        "stl": str(stl) if stl.exists() else None,
-        "step": str(step) if step.exists() else None,
+        "stl": str(stl) if stl_ok else None,
+        "step": str(step) if (step.exists() and step.stat().st_size > 0) else None,
         "stdout": r.stdout[-2000:],
         "stderr": r.stderr[-3000:],
     }
