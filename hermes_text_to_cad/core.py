@@ -140,6 +140,159 @@ def spec_from_prompt(prompt: str, out_path: str | None = None) -> dict[str, Any]
     return {"success": True, "spec": spec, "spec_path": written}
 
 
+# ---- ReAct error-feedback loop ----------------------------------------------
+# When CadQuery raises (bad fillet radius, OCC kernel error, non-manifold), the
+# traceback is the most valuable signal for the next attempt. summarize_error
+# turns it into a structured observation; iterate() assembles the next-attempt
+# context; generate_with_retry() drives the loop. All LLM-free: the *agent* is
+# the caller-supplied code_fn(observation) -> code, so the loop is deterministic
+# and unit-testable without a network/key.
+
+# A small map from a kernel/exception signature to an actionable hint. The OCC
+# kernel reports nearly every B-rep failure as the same opaque message, so the
+# triggering op matters more than the type.
+_ERROR_HINTS = [
+    ("StdFail_NotDone",
+     "OCC kernel could not complete the operation. Common cause: a fillet/chamfer "
+     "radius larger than the adjacent edge/face — reduce the radius or fillet fewer "
+     "edges. Also check shell thickness vs wall size."),
+    ("BRep_API: command not done",
+     "OCC B-rep operation failed. Often a too-large fillet/chamfer radius or an "
+     "invalid shell thickness. Reduce the radius/thickness and retry."),
+    ("Standard_ConstructionError",
+     "Invalid geometric construction (e.g. zero/negative dimension, degenerate "
+     "sketch). Check that all dimensions are positive and the sketch is closed."),
+    ("StdFail_NotDoneError",
+     "OCC operation incomplete — usually an out-of-range fillet/chamfer radius."),
+    ("no faces", "A selector matched no faces — check the .faces()/.edges() selector string."),
+    ("ModuleNotFoundError",
+     "A required module is missing from the CAD venv. Use only cadquery (and stdlib)."),
+    ("NameError",
+     "An undefined name — make sure to `import cadquery as cq` and define all variables."),
+    ("SyntaxError", "The generated code has a Python syntax error — fix it and retry."),
+]
+
+_PY_EXC_RE = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Fail[A-Za-z_]*)):?\s*(.*)$")
+
+
+def summarize_error(stderr: str | None) -> dict[str, Any] | None:
+    """Parse a Python/OCC traceback into a structured ReAct observation.
+
+    Returns {error_type, message, hint, raw} or None when there's no error text.
+    The hint maps opaque kernel failures (e.g. OCC's "BRep_API: command not
+    done") to actionable guidance the next generate attempt can act on.
+    """
+    if not stderr or not stderr.strip():
+        return None
+    lines = [ln.rstrip() for ln in stderr.strip().splitlines() if ln.strip()]
+    # The final non-empty line of a traceback is the exception line.
+    last = lines[-1]
+
+    error_type = "Error"
+    message = last
+    m = _PY_EXC_RE.match(last)
+    if m:
+        error_type = m.group(1)
+        message = m.group(2) or last
+        # Keep the dotted leaf for OCC types like OCP.OCP.StdFail.StdFail_NotDone
+        if "." in error_type:
+            error_type = error_type.split(".")[-1]
+        # The full last line carries the kernel message ("BRep_API: command not done").
+        if m.group(2):
+            message = last.split(":", 1)[1].strip() if ":" in last else m.group(2)
+
+    hint = ""
+    haystack = stderr
+    for needle, h in _ERROR_HINTS:
+        if needle in haystack:
+            hint = h
+            break
+
+    return {
+        "error_type": error_type,
+        "message": message,
+        "hint": hint,
+        "raw": stderr.strip()[-2000:],
+    }
+
+
+def iterate(prompt: str, history: list[dict] | None = None,
+            last_error: Any = None) -> dict[str, Any]:
+    """Assemble the structured observation for the NEXT cad_generate attempt.
+
+    The thin ReAct contract: the agent calls this between attempts to get
+    {attempt, spec, history, last_error, instruction}. last_error may be a raw
+    stderr string (summarized here) or an already-summarized dict (passed
+    through). Pure — no subprocess.
+    """
+    history = list(history or [])
+    attempt = len(history) + 1
+
+    if isinstance(last_error, str):
+        err = summarize_error(last_error)
+    else:
+        err = last_error  # already-summarized dict, or None
+
+    if err:
+        instruction = (
+            "The previous attempt FAILED. Fix the error below and regenerate the "
+            "CadQuery code. Do not repeat the same mistake.\n"
+            f"  error: {err.get('error_type')}: {err.get('message')}\n"
+            f"  hint:  {err.get('hint')}"
+        )
+    else:
+        instruction = (
+            "Generate CadQuery code that satisfies the spec. Export <stem>.stl and "
+            "<stem>.step into os.environ['CAD_OUT']."
+        )
+
+    return {
+        "attempt": attempt,
+        "prompt": prompt,
+        "spec": derive_spec(prompt),
+        "history": history,
+        "last_error": err,
+        "instruction": instruction,
+    }
+
+
+def generate_with_retry(code_fn, prompt: str, out_dir: str | None = None,
+                        stem: str = "part", max_iters: int = 3) -> dict[str, Any]:
+    """Drive the ReAct loop: regenerate with the error in context until success.
+
+    code_fn(observation) -> CadQuery source is the agent: it receives the
+    iterate() observation (including the summarized last_error) and returns the
+    next code to try. Returns {success, attempts, history, result} where result
+    is the final generate() dict.
+    """
+    history: list[dict] = []
+    last_error: Any = None
+    result: dict[str, Any] = {}
+
+    for _ in range(max(1, max_iters)):
+        obs = iterate(prompt, history=history, last_error=last_error)
+        code = code_fn(obs)
+        result = generate(code=code, out_dir=out_dir, stem=stem)
+        record = {
+            "attempt": obs["attempt"],
+            "success": bool(result.get("success")),
+            "error": summarize_error(result.get("stderr")) if not result.get("success") else None,
+        }
+        history.append(record)
+        if result.get("success"):
+            break
+        last_error = result.get("stderr")
+        # reuse the same out_dir across attempts so artifacts land together
+        out_dir = out_dir or result.get("out_dir")
+
+    return {
+        "success": bool(result.get("success")),
+        "attempts": len(history),
+        "history": history,
+        "result": result,
+    }
+
+
 def _run(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     # render.py auto-sets DISPLAY=:0 from WSLg; pass through if already set.

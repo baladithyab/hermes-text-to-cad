@@ -37,6 +37,31 @@ hole** fails the gate, a case a bbox-only check silently passes.
 
 Plus a `hermes cad` CLI: `cad doctor` (readiness) and `cad setup` (provision the CAD venv).
 
+## ReAct error-feedback loop
+
+CadQuery's OCC kernel reports most B-rep failures (a fillet radius larger than
+its edge, an invalid shell, a degenerate sketch) as the same opaque
+`StdFail_NotDone: BRep_API: command not done`. Rather than let the model flail,
+`cad_generate` returns the full `stderr`, and `core.summarize_error()` turns the
+traceback into a structured, actionable observation:
+
+```jsonc
+{ "error_type": "StdFail_NotDone",
+  "message": "BRep_API: command not done",
+  "hint": "OCC kernel could not complete… a fillet/chamfer radius larger than
+           the adjacent edge — reduce the radius or fillet fewer edges." }
+```
+
+The agent feeds that back via `core.iterate(prompt, history, last_error)` — the
+thin ReAct contract that assembles the next attempt's context (attempt #,
+derived spec, summarized error, instruction). `core.generate_with_retry(code_fn,
+prompt, max_iters=3)` is the executable driver: it regenerates **with the error
+in context** until the part builds or the cap is hit, keeping a per-attempt
+history. The loop is LLM-free in `core` — the agent is the caller-supplied
+`code_fn(observation) -> code` — so it's deterministic and fully unit-tested.
+A 10 mm cube asked for a 50 mm fillet fails on attempt 1 and auto-corrects to a
+valid radius on attempt 2 (verified in `tests/test_integration.py`).
+
 ## Install
 
 > ⚠️ Three steps. A bare `pip install` is **not** enough — the Hermes loader only discovers plugins under `~/.hermes/plugins/<name>/`, and deps must land in the **Hermes venv**, not your shell's python.

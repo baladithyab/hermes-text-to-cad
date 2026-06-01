@@ -139,3 +139,51 @@ def test_solid_box_genus_zero():
     assert meas["genus"] == 0
     assert meas["through_holes"] == 0
     assert meas["solidity"] == pytest.approx(1.0, abs=1e-3)
+
+
+# ---- Wave 1.2: ReAct error-feedback loop, end-to-end (real OCC failure) ------
+
+def test_react_loop_autocorrects_bad_fillet(tmp_path):
+    """A part that fails on first generate (fillet radius too large for the edge)
+    gets auto-corrected within the iteration cap.
+
+    First attempt: a 10mm cube with a 50mm fillet → OCC raises StdFail_NotDone.
+    The loop summarizes that traceback into the observation; the (deterministic)
+    agent reads last_error and picks a valid 2mm radius on the next attempt.
+    """
+    BROKEN = (
+        "import cadquery as cq, os\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        "part = cq.Workplane('XY').box(10, 10, 10).edges('|Z').fillet(50)\n"
+        "cq.exporters.export(part, os.path.join(OUT, 'part.stl'))\n"
+        "cq.exporters.export(part, os.path.join(OUT, 'part.step'))\n"
+    )
+    FIXED = (
+        "import cadquery as cq, os\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        "part = cq.Workplane('XY').box(10, 10, 10).edges('|Z').fillet(2)\n"
+        "cq.exporters.export(part, os.path.join(OUT, 'part.stl'))\n"
+        "cq.exporters.export(part, os.path.join(OUT, 'part.step'))\n"
+    )
+
+    def code_fn(obs):
+        # The agent: use the summarized error to switch from the broken radius.
+        if obs["last_error"] is None:
+            return BROKEN
+        # Confirm the loop actually surfaced the OCC kernel failure as context.
+        assert "StdFail" in obs["last_error"]["error_type"] or \
+               "radius" in obs["last_error"]["hint"].lower()
+        return FIXED
+
+    res = core.generate_with_retry(
+        code_fn, prompt="a 10mm cube with lightly rounded vertical edges",
+        out_dir=str(tmp_path), max_iters=3,
+    )
+
+    assert res["success"] is True, res["history"]
+    assert res["attempts"] == 2
+    assert res["history"][0]["success"] is False
+    assert res["history"][0]["error"]["error_type"].startswith("StdFail") or \
+           "BRep" in res["history"][0]["error"]["message"]
+    assert res["history"][1]["success"] is True
+    assert Path(res["result"]["stl"]).exists()
