@@ -15,6 +15,7 @@ Public surface (used by __init__.register and the CLI):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -23,9 +24,55 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SCRIPTS = PLUGIN_DIR / "scripts"
 DEFAULT_VENV = Path(os.path.expanduser("~/.venvs/cad"))
+
+# ---- subprocess environment scrubbing (ADR-0001) ----------------------------
+# cad_generate runs ARBITRARY model-authored Python in a subprocess. Inheriting
+# the full os.environ would hand that code OPENROUTER_API_KEY and every other
+# secret in the Hermes process. We pass ONLY an allowlist. This is default-deny:
+# a denylist leaks any not-yet-patterned secret; an empty env breaks PATH/HOME/
+# locale/render tooling. So: allow exactly what the CAD subprocesses need.
+#
+# Exact-match keys + LC_* prefix. HERMES_CAD_PYTHON is deliberately ABSENT — it's
+# read in the parent to LOCATE the interpreter; the child never needs it. The
+# vision gate (scatter_review.py) reads OPENROUTER_API_KEY from ~/.hermes/.env
+# itself, so the key never needs to ride in any subprocess env either.
+_ENV_ALLOWLIST = frozenset({
+    # locating + running an interpreter
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "PWD",
+    # locale (cadquery/OCC, font lookup, text rendering)
+    "LANG", "LANGUAGE",
+    # output dir (injected per-call via extra=)
+    "CAD_OUT",
+    # render / X / GL knobs the render path needs
+    "DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY",
+    "LIBGL_ALWAYS_SOFTWARE", "GALLIUM_DRIVER", "MESA_GL_VERSION_OVERRIDE",
+    "VTK_DEFAULT_OPENGL_WINDOW", "PYOPENGL_PLATFORM", "__GLX_VENDOR_LIBRARY_NAME",
+    # python runtime hygiene (no behavior leak, but keep deterministic)
+    "PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE",
+})
+
+
+def _scrubbed_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a minimal subprocess env from an allowlist (ADR-0001).
+
+    Returns only allowlisted keys (exact-match in _ENV_ALLOWLIST, or LC_*),
+    never arbitrary secrets from the parent. ``extra`` is merged last so callers
+    can inject/override (e.g. CAD_OUT for generate). HERMES_CAD_PYTHON and every
+    *_API_KEY/*_TOKEN/*_SECRET are dropped by construction (they're not on the
+    allowlist).
+    """
+    env: dict[str, str] = {}
+    for k, v in os.environ.items():
+        if k in _ENV_ALLOWLIST or k.startswith("LC_"):
+            env[k] = v
+    if extra:
+        env.update(extra)
+    return env
 
 
 def cad_venv_python() -> str:
@@ -309,8 +356,10 @@ def generate_with_retry(code_fn, prompt: str, out_dir: str | None = None,
 
 
 def _run(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    # render.py auto-sets DISPLAY=:0 from WSLg; pass through if already set.
+    # Scrubbed allowlist env (ADR-0001) — never inherit the full os.environ into
+    # a CAD subprocess. render.py auto-sets DISPLAY=:0 from WSLg; DISPLAY is on
+    # the allowlist so an already-set one passes through.
+    env = _scrubbed_env()
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
 
 
@@ -333,7 +382,10 @@ def generate(code: str, out_dir: str | None = None, stem: str = "part") -> dict[
     out.mkdir(parents=True, exist_ok=True)
     script = out / f"{stem}_gen.py"
     script.write_text(code)
-    env = dict(os.environ, CAD_OUT=str(out))
+    # Scrubbed allowlist env + CAD_OUT (ADR-0001). This is the chokepoint that
+    # runs MODEL-AUTHORED code, so it must never see OPENROUTER_API_KEY or any
+    # other parent secret. CAD_OUT is the one var we inject.
+    env = _scrubbed_env({"CAD_OUT": str(out)})
     # cwd=out so scripts that export with bare local names still land in CAD_OUT.
     r = subprocess.run([py, str(script)], capture_output=True, text=True,
                        timeout=300, env=env, cwd=str(out))

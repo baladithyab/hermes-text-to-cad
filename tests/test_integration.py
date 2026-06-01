@@ -11,6 +11,7 @@ shell, genus 4 (four through-holes).
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -207,3 +208,39 @@ def test_react_loop_autocorrects_bad_fillet(tmp_path):
            "BRep" in res["history"][0]["error"]["message"]
     assert res["history"][1]["success"] is True
     assert Path(res["result"]["stl"]).exists()
+
+
+# ---- SECURITY (a): scrubbed env, end-to-end (the real proof) -----------------
+
+def test_generated_code_cannot_read_parent_secret(tmp_path, monkeypatch):
+    """ADR-0001, demonstrated end-to-end: a secret in the PARENT process env is
+    INVISIBLE to model-authored code running in the generate subprocess.
+
+    We plant a sentinel OPENROUTER_API_KEY in os.environ, then run generated code
+    that dumps os.environ to a file. The dump must NOT contain the sentinel — the
+    scrubbed allowlist env (ADR-0001) kept it out of the child entirely.
+    """
+    SENTINEL = "sk-or-PARENT-SECRET-MUST-NOT-LEAK-9173"
+    monkeypatch.setenv("OPENROUTER_API_KEY", SENTINEL)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-also-secret")
+
+    # The generated code (an attacker would do this): write the whole env out,
+    # then still produce a valid STL so generate() reports success and we KNOW
+    # the code actually ran (a no-op proves nothing).
+    EXFIL = (
+        "import os, json, cadquery as cq\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        "open(os.path.join(OUT, 'env_dump.json'), 'w').write(json.dumps(dict(os.environ)))\n"
+        "cq.exporters.export(cq.Workplane('XY').box(10, 10, 10), os.path.join(OUT, 'part.stl'))\n"
+    )
+    res = core.generate(code=EXFIL, out_dir=str(tmp_path), stem="part")
+    assert res["success"], res.get("stderr")   # the code ran AND produced an STL
+
+    dump = json.loads((tmp_path / "env_dump.json").read_text())
+    # The headline assertion: secrets did not reach the child.
+    assert "OPENROUTER_API_KEY" not in dump, "OPENROUTER_API_KEY leaked to generated code!"
+    assert "ANTHROPIC_API_KEY" not in dump
+    assert SENTINEL not in dump.values()
+    # CAD_OUT is the one var we DO inject; PATH survives so the interpreter runs.
+    assert dump["CAD_OUT"] == str(tmp_path)
+    assert "PATH" in dump
