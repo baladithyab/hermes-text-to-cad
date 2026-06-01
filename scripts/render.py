@@ -218,7 +218,11 @@ def _render_matplotlib_section(m, ctr, r, outdir, stem, axis):
     import numpy as np
     ai = {"x": 0, "y": 1, "z": 2}.get(axis, 0)
     face_ctr = m.vertices[m.faces].mean(axis=1)        # centroid of each tri
-    keep = face_ctr[:, ai] <= ctr[ai]                  # near half
+    # Keep the POSITIVE half (coord >= centroid) to MATCH the VTK clip plane,
+    # which uses vtkClipPolyData with InsideOut off and so retains value>0 (the
+    # +normal side). Keeping opposite halves would show a feature in one backend
+    # and hide it in the other (final-review finding).
+    keep = face_ctr[:, ai] >= ctr[ai]                  # positive half — matches VTK
     tris = m.vertices[m.faces][keep]
     fig = plt.figure(figsize=(6, 6)); ax = fig.add_subplot(111, projection="3d")
     if len(tris):

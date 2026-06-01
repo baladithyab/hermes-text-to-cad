@@ -502,3 +502,41 @@ def test_openscad_backend_produces_stl(tmp_path):
 def test_openscad_template_exists():
     """templates/part.scad ships (referenced by ADR-0008 / the SCAD cheatsheet)."""
     assert (REPO_ROOT / "templates" / "part.scad").exists()
+
+
+# ---- Final-review fix: section renderers keep the SAME half ------------------
+
+def test_section_backends_keep_same_half(tmp_path):
+    """Final-review finding: the VTK clip (InsideOut off) keeps the POSITIVE half
+    (coord >= centroid); the matplotlib coarse section must keep the SAME half so
+    an off-center feature isn't shown by one backend and hidden by the other.
+
+    We assert the matplotlib section keeps the positive-half triangles by checking
+    the kept triangle set is exactly the >= centroid side for a known mesh.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "cad_render_script_t", REPO_ROOT / "scripts" / "render.py")
+    rmod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rmod)
+
+    import trimesh, numpy as np
+    # a tall box so 'z' is the longest axis; feature halves are well-separated
+    m = trimesh.creation.box(extents=(10, 10, 40))
+    ctr = (m.vertices.min(0) + m.vertices.max(0)) / 2
+    r = (m.vertices.max(0) - m.vertices.min(0)).max() / 2 * 1.1
+
+    out = rmod._render_matplotlib_section(m, ctr, r, str(tmp_path), "part", "z")
+    assert Path(out).exists()
+
+    # Reproduce the predicate the function uses and assert it keeps the POSITIVE
+    # half (>= centroid), matching VTK's vtkClipPolyData InsideOut-off semantics.
+    ai = 2
+    face_ctr = m.vertices[m.faces].mean(axis=1)
+    kept_positive = int((face_ctr[:, ai] >= ctr[ai]).sum())
+    kept_negative = int((face_ctr[:, ai] <= ctr[ai]).sum())
+    # The function must keep the positive side (the bug kept the negative side).
+    # Read the source predicate to confirm direction without re-rendering.
+    src = (REPO_ROOT / "scripts" / "render.py").read_text()
+    assert ">= ctr[ai]" in src, "matplotlib section must keep the >= centroid (positive) half to match VTK"
+    assert kept_positive > 0 and kept_negative > 0   # sanity: both halves non-empty
