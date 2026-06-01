@@ -89,7 +89,9 @@ def test_render_produces_montage(generated):
     res = core.render(stl=generated["stl"])
     assert res["success"] is True, res.get("stderr")
     assert res["montage"] and Path(res["montage"]).exists()
-    assert res["backend"] in ("vtk", "matplotlib")
+    # PBR studio path (ADR-0010): vtk-pbr[-glb] / vtk-osmesa-pbr[-glb], or the
+    # matplotlib fallback. The "vtk" prefix is the through-line.
+    assert res["backend"].startswith("vtk") or res["backend"] == "matplotlib"
 
 
 # ---- Wave 1.1: prompt-derived geometric gate, end-to-end (real geometry) -----

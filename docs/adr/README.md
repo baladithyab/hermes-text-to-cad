@@ -14,6 +14,7 @@ once accepted; a reversal is a new ADR that supersedes the old one.
 | [0007](0007-cad-plan-cot-step.md) | Optional CoT plan step (cad_plan), deterministic | accepted | 2.3 |
 | [0008](0008-openscad-backend.md) | Optional OpenSCAD backend, mesh-only | accepted | 3.3 |
 | [0009](0009-section-cutaway-render.md) | Section/cutaway render for internal features | accepted | 3.2 |
+| [0010](0010-pbr-render-path.md) | PBR render path (GLTF import + IBL + studio rig + filmic tone mapping) | accepted | uplift-2 |
 
 ## Cross-cutting invariants (apply to every ADR)
 
