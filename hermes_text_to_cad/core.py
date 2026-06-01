@@ -85,6 +85,33 @@ def cad_venv_python() -> str:
     return str(DEFAULT_VENV / "bin" / "python")
 
 
+# Common no-root AppImage-extract locations (`openscad.AppImage --appimage-extract`
+# leaves a squashfs-root tree). Checked after $PATH; HERMES_OPENSCAD_BIN wins.
+_OPENSCAD_CANDIDATES = (
+    "~/squashfs-root/usr/bin/openscad",
+    "~/.local/bin/openscad",
+    "~/openscad/squashfs-root/usr/bin/openscad",
+    "/opt/openscad/squashfs-root/usr/bin/openscad",
+)
+
+
+def openscad_bin() -> str | None:
+    """Resolve an OpenSCAD binary (ADR-0008): HERMES_OPENSCAD_BIN, then $PATH,
+    then common AppImage-extract locations. None if not found — the optional
+    backend degrades to a clear error rather than crashing."""
+    override = os.environ.get("HERMES_OPENSCAD_BIN")
+    if override and os.path.exists(override):
+        return override
+    found = shutil.which("openscad")
+    if found:
+        return found
+    for cand in _OPENSCAD_CANDIDATES:
+        p = os.path.expanduser(cand)
+        if os.path.exists(p):
+            return p
+    return None
+
+
 # ---- opt-in OS sandbox for generated code (ADR-0002) ------------------------
 # When HERMES_CAD_SANDBOX=1, wrap the generate subprocess in bubblewrap (no
 # network, read-only filesystem except CAD_OUT, secret dirs masked with tmpfs).
@@ -558,24 +585,41 @@ def venv_ready() -> bool:
     return r.returncode == 0 and "ok" in r.stdout
 
 
-def generate(code: str, out_dir: str | None = None, stem: str = "part") -> dict[str, Any]:
-    """Execute user-supplied CadQuery code in the CAD venv.
+def generate(code: str, out_dir: str | None = None, stem: str = "part",
+             backend: str = "cadquery") -> dict[str, Any]:
+    """Execute user-supplied modeling code and export a mesh.
 
-    The code should export <stem>.stl and <stem>.step into CAD_OUT.
-    Returns {success, out_dir, stl, step, stdout, stderr}.
+    backend="cadquery" (default): runs the code as Python in the CAD venv; it
+    should export <stem>.stl and <stem>.step into CAD_OUT. backend="openscad":
+    treats `code` as SCAD source and runs the openscad binary -> <stem>.stl
+    (mesh-only, no STEP — ADR-0008). Returns {success, backend, out_dir, stl,
+    step, stdout, stderr}.
     """
-    py = cad_venv_python()
     out = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="cad_"))
     out.mkdir(parents=True, exist_ok=True)
 
+    if backend == "openscad":
+        return _generate_openscad(code, out, stem)
+    if backend != "cadquery":
+        return {
+            "success": False, "backend": backend, "out_dir": str(out),
+            "stl": None, "step": None, "stdout": "",
+            "error": f"unknown backend {backend!r} (use 'cadquery' or 'openscad')",
+            "stderr": f"unknown backend {backend!r}",
+        }
+
+    py = cad_venv_python()
+
     # Layer-1 static safety pre-check (ADR-0003): reject obvious exfil/abuse
     # BEFORE executing model-authored code. Defense-in-depth — the scrubbed env
-    # (ADR-0001) and opt-in sandbox (ADR-0002) are the real boundaries.
+    # (ADR-0001) and opt-in sandbox (ADR-0002) are the real boundaries. This is
+    # Python-specific, so it only applies to the cadquery backend.
     check = safety.check_code(code)
     if not check["ok"]:
         logger.warning("cad_generate: rejected unsafe code: %s", check["violations"])
         return {
             "success": False,
+            "backend": "cadquery",
             "rejected": True,
             "violations": check["violations"],
             "out_dir": str(out),
@@ -619,10 +663,70 @@ def generate(code: str, out_dir: str | None = None, stem: str = "part") -> dict[
     stl_ok = stl.exists() and stl.stat().st_size > 0
     return {
         "success": r.returncode == 0 and stl_ok,
+        "backend": "cadquery",
         "sandbox": sandbox_state,
         "out_dir": str(out),
         "stl": str(stl) if stl_ok else None,
         "step": str(step) if (step.exists() and step.stat().st_size > 0) else None,
+        "stdout": r.stdout[-2000:],
+        "stderr": r.stderr[-3000:],
+    }
+
+
+def _generate_openscad(code: str, out: Path, stem: str) -> dict[str, Any]:
+    """OpenSCAD backend (ADR-0008): write .scad, run `openscad -o <stem>.stl`.
+
+    Mesh-only (no STEP). The Python AST denylist does NOT apply (SCAD isn't
+    Python); the scrubbed env (ADR-0001) and opt-in sandbox (ADR-0002) still do.
+    Returns a clear error (no crash) when no openscad binary is found.
+    """
+    binary = openscad_bin()
+    if not binary:
+        msg = ("openscad backend requested but no binary found — set "
+               "HERMES_OPENSCAD_BIN, put `openscad` on PATH, or extract an "
+               "AppImage (`openscad.AppImage --appimage-extract`).")
+        logger.warning("cad_generate(openscad): %s", msg)
+        return {
+            "success": False, "backend": "openscad", "out_dir": str(out),
+            "stl": None, "step": None, "stdout": "", "error": msg, "stderr": msg,
+        }
+
+    scad = out / f"{stem}.scad"
+    scad.write_text(code)
+    stl = out / f"{stem}.stl"
+    inner = [binary, "-o", str(stl), str(scad)]
+
+    # same opt-in sandbox + scrubbed env as the cadquery path
+    env = _scrubbed_env({"CAD_OUT": str(out)})
+    sandbox_state = "off"
+    argv = inner
+    if os.environ.get("HERMES_CAD_SANDBOX"):
+        info = sandbox_info()
+        if info["available"]:
+            argv = _wrap_sandbox(inner, out_dir=str(out))
+            sandbox_state = info["tool"]
+        else:
+            logger.warning("HERMES_CAD_SANDBOX=1 set but no sandbox tool found — "
+                           "running openscad UNSANDBOXED.")
+            sandbox_state = "requested-unavailable"
+
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=300, env=env, cwd=str(out))
+    except Exception as e:
+        logger.warning("cad_generate(openscad): subprocess failed: %s", e)
+        return {"success": False, "backend": "openscad", "out_dir": str(out),
+                "stl": None, "step": None, "stdout": "", "error": repr(e),
+                "stderr": repr(e)}
+
+    stl_ok = stl.exists() and stl.stat().st_size > 0
+    return {
+        "success": r.returncode == 0 and stl_ok,
+        "backend": "openscad",
+        "sandbox": sandbox_state,
+        "out_dir": str(out),
+        "stl": str(stl) if stl_ok else None,
+        "step": None,   # OpenSCAD is mesh-only (ADR-0008)
         "stdout": r.stdout[-2000:],
         "stderr": r.stderr[-3000:],
     }
@@ -917,6 +1021,16 @@ def doctor() -> dict[str, Any]:
                               if sb["available"]
                               else "OPTIONAL: install bubblewrap (bwrap) or firejail to sandbox "
                                    "untrusted generated code (HERMES_CAD_SANDBOX=1)")})
+
+    # Optional OpenSCAD backend (ADR-0008). Not required — CadQuery is the
+    # default and primary backend — but reported so the agent knows whether
+    # cad_generate(backend='openscad') is available.
+    oscad = openscad_bin()
+    checks.append({"check": "openscad_backend", "pass": bool(oscad),
+                   "detail": (f"openscad ({oscad}) — cad_generate backend='openscad' available"
+                              if oscad
+                              else "OPTIONAL: install openscad (or set HERMES_OPENSCAD_BIN) for "
+                                   "the CSG backend; CadQuery is the default")})
 
     # numeric gate works without display or key; vision gate needs key.
     core_ok = venv_ok and libs_ok and scripts_ok

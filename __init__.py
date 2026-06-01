@@ -38,7 +38,8 @@ def _cad_plan(args: dict, **_kw: Any) -> dict[str, Any]:
 
 
 def _cad_generate(args: dict, **_kw: Any) -> dict[str, Any]:
-    return core.generate(code=args["code"], out_dir=args.get("out_dir"), stem=args.get("stem", "part"))
+    return core.generate(code=args["code"], out_dir=args.get("out_dir"),
+                         stem=args.get("stem", "part"), backend=args.get("backend", "cadquery"))
 
 
 def _cad_render(args: dict, **_kw: Any) -> dict[str, Any]:
@@ -136,22 +137,26 @@ def register(ctx: Any) -> None:
         name="cad_generate",
         toolset="cad",
         handler=_cad_generate,
-        description=("Execute CadQuery Python code to build a parametric 3D model. The code "
-                     "must export <stem>.stl and <stem>.step into the CAD_OUT directory "
-                     "(read it from os.environ['CAD_OUT']). Returns paths to the STL (mesh, "
-                     "for render/measure/print) and STEP (B-rep, for manufacturing). Step 2 "
-                     "of the closed CAD loop."),
+        description=("Execute modeling code to build a parametric 3D model. backend='cadquery' "
+                     "(default): CadQuery Python that exports <stem>.stl and <stem>.step into "
+                     "the CAD_OUT directory (os.environ['CAD_OUT']) — returns STL (mesh) + STEP "
+                     "(B-rep). backend='openscad': SCAD source run via the openscad binary -> "
+                     "STL only (mesh, no STEP). SECURITY: cadquery code is model-authored and "
+                     "executed; it runs with a scrubbed secret-free env + an AST pre-check, and "
+                     "with HERMES_CAD_SANDBOX=1 inside a no-network read-only sandbox. Step 2 of "
+                     "the closed CAD loop."),
         emoji="📐",
         schema={
             "name": "cad_generate",
-            "description": "Run CadQuery code -> STL + STEP (exports into $CAD_OUT).",
+            "description": "Run CadQuery (->STL+STEP) or OpenSCAD (->STL) code, exporting into $CAD_OUT.",
             "parameters": {
                 "type": "object",
                 "required": ["code"],
                 "properties": {
-                    "code": {"type": "string", "description": "CadQuery Python source; exports STL+STEP into os.environ['CAD_OUT']."},
+                    "code": {"type": "string", "description": "Modeling source. CadQuery Python (exports STL+STEP into os.environ['CAD_OUT']) or SCAD source when backend='openscad'."},
                     "out_dir": {"type": "string", "description": "Output dir; temp dir if omitted."},
                     "stem": {"type": "string", "description": "Filename stem (default 'part')."},
+                    "backend": {"type": "string", "enum": ["cadquery", "openscad"], "description": "Modeling backend (default 'cadquery'; 'openscad' is mesh-only)."},
                 },
             },
         },

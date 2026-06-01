@@ -371,7 +371,7 @@ def test_doctor_shape_when_venv_ready(tmp_path, monkeypatch):
     assert names == [
         "cad_venv_exists", "cad_libs_import", "render_display",
         "render_headless_gl", "vision_gate_key", "scripts_present",
-        "sandbox_available",
+        "sandbox_available", "openscad_backend",
     ]
     for c in rep["checks"]:
         assert set(c.keys()) == {"check", "pass", "detail"}

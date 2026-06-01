@@ -479,3 +479,26 @@ def test_derive_spec_internal_features_drives_section(tmp_path):
     which an agent uses to request section=True."""
     spec = core.derive_spec("a block with an internal cooling channel")
     assert spec.get("internal_features") is True
+
+
+# ---- Wave 3.3: OpenSCAD backend, end-to-end (skips if no binary) -------------
+
+@pytest.mark.skipif(core.openscad_bin() is None,
+                    reason="no openscad binary (optional backend)")
+def test_openscad_backend_produces_stl(tmp_path):
+    """ADR-0008 acceptance: cad_generate(backend='openscad') runs the openscad
+    binary and produces an STL (mesh-only, no STEP). Skips when no binary."""
+    scad = "cube([20, 15, 10], center=true);"
+    res = core.generate(code=scad, out_dir=str(tmp_path), stem="part", backend="openscad")
+    assert res["success"], res.get("stderr")
+    assert res["backend"] == "openscad"
+    assert res["stl"] and Path(res["stl"]).exists()
+    assert res["step"] is None              # mesh-only
+    # the produced STL is measurable by the numeric gate
+    meas = core.measure(stl=res["stl"])
+    assert sorted(meas["report"]["measured"]["bbox_mm"]) == pytest.approx([10, 15, 20], abs=0.5)
+
+
+def test_openscad_template_exists():
+    """templates/part.scad ships (referenced by ADR-0008 / the SCAD cheatsheet)."""
+    assert (REPO_ROOT / "templates" / "part.scad").exists()
