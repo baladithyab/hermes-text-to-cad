@@ -93,11 +93,17 @@ def cad_venv_python() -> str:
 # exists, we WARN and run unsandboxed (degrade, not fail) — a conscious choice
 # documented in ADR-0002, surfaced as sandbox="requested-unavailable".
 
-# Home-relative dirs to mask inside the sandbox so generated code can't read
-# secrets/keys even though the root is bind-mounted read-only. Masked via tmpfs
-# at the RESOLVED realpath (a symlinked ~/.aws -> /mnt/c/... still gets masked).
-_SECRET_DIRS = (".hermes", ".ssh", ".aws", ".gnupg", ".config/gcloud",
-                ".kube", ".docker", ".netrc")
+# Home-relative paths to mask inside the sandbox so generated code can't read
+# secrets/keys even though the root is bind-mounted read-only. Masked at the
+# RESOLVED realpath (a symlinked ~/.aws -> /mnt/c/... still gets masked).
+# Directories are masked with --tmpfs; FILES need --ro-bind /dev/null (a tmpfs
+# can't mount over a regular file) — keeping them separate fixes the bug where
+# .netrc (a file) was silently skipped by an isdir() guard.
+_SECRET_DIRS = (".hermes", ".ssh", ".aws", ".gnupg", ".azure",
+                ".config/gcloud", ".config/git", ".kube", ".docker",
+                ".local/share/keyrings")
+_SECRET_FILES = (".netrc", ".git-credentials", ".gitconfig",
+                 ".npmrc", ".pypirc", ".python_history", ".bash_history")
 
 
 def sandbox_info() -> dict[str, Any]:
@@ -122,6 +128,7 @@ def _wrap_sandbox(inner_argv: list[str], out_dir: str) -> list[str]:
     if not info["available"]:
         return list(inner_argv)
     home = os.path.expanduser("~")
+    seen: set[str] = set()
     if info["tool"] == "bwrap":
         argv = [
             info["bin"],
@@ -129,25 +136,39 @@ def _wrap_sandbox(inner_argv: list[str], out_dir: str) -> list[str]:
             "--ro-bind", "/", "/",
             "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
         ]
-        # mask secret dirs (only those whose realpath is an existing dir — bwrap
-        # errors on a tmpfs target that doesn't exist in the new root)
-        seen: set[str] = set()
+        # mask secret DIRS with tmpfs (only existing dirs — bwrap errors on a
+        # tmpfs target that doesn't exist in the new root)
         for d in _SECRET_DIRS:
             rp = os.path.realpath(os.path.join(home, d))
             if rp not in seen and os.path.isdir(rp):
                 argv += ["--tmpfs", rp]
                 seen.add(rp)
-        argv += [
-            "--bind", out_dir, out_dir,
-            "--chdir", out_dir,
-        ]
+        # mask secret FILES by binding /dev/null over them (tmpfs can't cover a
+        # regular file — this is the .netrc bug the review caught)
+        for f in _SECRET_FILES:
+            rp = os.path.realpath(os.path.join(home, f))
+            if rp not in seen and os.path.isfile(rp):
+                argv += ["--ro-bind", "/dev/null", rp]
+                seen.add(rp)
+        argv += ["--bind", out_dir, out_dir, "--chdir", out_dir]
         argv += list(inner_argv)
         return argv
-    # firejail fallback
+    # firejail fallback — bring to parity: read-only root + blacklist secrets,
+    # not just --net=none + whitelist (which leaves $HOME readable).
     argv = [
         info["bin"], "--quiet", "--net=none", "--private-tmp",
-        f"--whitelist={out_dir}",
+        "--read-only=/", f"--read-write={out_dir}", f"--whitelist={out_dir}",
     ]
+    for d in _SECRET_DIRS:
+        rp = os.path.realpath(os.path.join(home, d))
+        if rp not in seen and os.path.isdir(rp):
+            argv += [f"--blacklist={rp}"]
+            seen.add(rp)
+    for f in _SECRET_FILES:
+        rp = os.path.realpath(os.path.join(home, f))
+        if rp not in seen and os.path.isfile(rp):
+            argv += [f"--blacklist={rp}"]
+            seen.add(rp)
     argv += list(inner_argv)
     return argv
 

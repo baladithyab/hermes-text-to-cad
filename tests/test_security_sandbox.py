@@ -115,13 +115,51 @@ def test_wrap_sandbox_masks_existing_secret_dirs(tmp_path, monkeypatch):
     assert str(home / ".gnupg") not in joined
 
 
+def test_wrap_sandbox_masks_file_type_secret(tmp_path, monkeypatch):
+    # review #4: a FILE secret (.netrc) must be masked too — the old isdir()
+    # guard silently skipped it. Files get --ro-bind /dev/null, not --tmpfs.
+    monkeypatch.setattr(core.shutil, "which",
+                        lambda b: "/usr/bin/bwrap" if b == "bwrap" else None)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".netrc").write_text("machine x login y password z\n")
+    monkeypatch.setenv("HOME", str(home))
+    argv = core._wrap_sandbox(["/fake/py", "x.py"], out_dir=str(tmp_path / "out"))
+    netrc = str((home / ".netrc").resolve())
+    # masked via ro-bind /dev/null (tmpfs can't mount over a file)
+    assert "--ro-bind" in argv
+    assert netrc in argv
+    i = argv.index(netrc)
+    assert argv[i - 2] == "--ro-bind" and argv[i - 1] == "/dev/null"
+
+
+def test_wrap_sandbox_masks_expanded_secret_dirs(tmp_path, monkeypatch):
+    # review #4: the expanded secret set is masked when present.
+    monkeypatch.setattr(core.shutil, "which",
+                        lambda b: "/usr/bin/bwrap" if b == "bwrap" else None)
+    home = tmp_path / "home"
+    for d in (".azure", ".config/git"):
+        (home / d).mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    argv = core._wrap_sandbox(["/fake/py", "x.py"], out_dir=str(tmp_path / "out"))
+    joined = " ".join(argv)
+    assert str((home / ".azure").resolve()) in joined
+    assert str((home / ".config/git").resolve()) in joined
+
+
 def test_wrap_sandbox_firejail_argv(tmp_path, monkeypatch):
     monkeypatch.setattr(core.shutil, "which",
                         lambda b: "/usr/bin/firejail" if b == "firejail" else None)
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
     inner = ["/fake/py", "part_gen.py"]
     argv = core._wrap_sandbox(inner, out_dir=str(tmp_path))
     assert argv[0] == "/usr/bin/firejail"
-    assert any(a.startswith("--net") for a in argv)   # net disabled
+    assert any(a.startswith("--net") for a in argv)        # net disabled
+    # review #5: firejail must also give read-only root + blacklist secret dirs
+    assert any(a.startswith("--read-only") for a in argv)
+    assert any(a.startswith("--blacklist") and ".ssh" in a for a in argv)
     assert argv[-2:] == inner
 
 

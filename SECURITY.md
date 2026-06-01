@@ -46,13 +46,17 @@ Layered so that defeating one does not defeat the others. The OS sandbox (layer
   `ftplib`, `smtplib`, `ctypes`, `multiprocessing`, `pty`, `asyncio`, …
 - dangerous builtins: `eval`, `exec`, `compile`, `__import__`, `input`
 - `os.system` / `os.popen` / `os.exec*` / `os.spawn*` / `os.fork`
-- `open(..., 'w'|'a'|...)` / `Path.write_*` to an absolute, non-`CAD_OUT` path
+- writes escaping `CAD_OUT` via a **literal** path that is absolute, `~`-rooted,
+  or contains a `..` parent-segment — across `open(...,'w')`, `Path.write_*`,
+  `os.open(..., O_WRONLY|O_CREAT|...)`, and the move/link primitives
+  `os.rename`/`os.replace`/`os.link`/`os.symlink`/`shutil.move`
 - syntax errors; code blobs over 100 KB (DoS guard)
 
 This is a **first line, not a verifier.** AST evasion (dynamic imports built from
-strings, `getattr`, runtime-computed paths) is expected and is contained by
-layers 2–3. Disable with `HERMES_CAD_NO_AST_CHECK=1` (drops only the cheap
-pre-filter; the env-scrub and sandbox still apply).
+strings, `getattr`, paths computed at runtime that the AST can't resolve
+statically) is expected and is contained by layers 2–3. Disable with
+`HERMES_CAD_NO_AST_CHECK=1` (drops only the cheap pre-filter; the env-scrub and
+sandbox still apply).
 
 ### Layer 2 — scrubbed subprocess environment (always on)
 
@@ -75,9 +79,13 @@ preferred) or **firejail** (fallback) (ADR-0002):
 - `--unshare-net` → **no network** (exfil/SSRF/C2 blocked at the OS).
 - `--ro-bind / /` → **read-only filesystem** (covers the interpreter, libs).
 - `--bind CAD_OUT CAD_OUT` → the output dir is the **only** writable path.
-- `--tmpfs` over `~/.hermes`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
-  `~/.docker`, `~/.netrc` (and more) → secret dirs are **masked** inside the
-  sandbox; the host copies are untouched.
+- secret **dirs** (`~/.hermes`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.azure`,
+  `~/.config/gcloud`, `~/.config/git`, `~/.kube`, `~/.docker`,
+  `~/.local/share/keyrings`) are masked with `--tmpfs`, and secret **files**
+  (`~/.netrc`, `~/.git-credentials`, `~/.gitconfig`, `~/.npmrc`, `~/.pypirc`, …)
+  are masked by binding `/dev/null` over them — the host copies are untouched.
+  The `firejail` fallback applies the equivalent `--read-only=/` plus a
+  `--blacklist` per secret path.
 
 If `HERMES_CAD_SANDBOX=1` is set but no sandbox tool is installed, the plugin
 **warns and runs unsandboxed** (degrade, not fail) and reports

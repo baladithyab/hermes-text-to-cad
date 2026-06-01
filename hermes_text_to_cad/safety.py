@@ -49,11 +49,29 @@ BANNED_OS_CALLS = frozenset({
 # pathlib write methods that bypass open().
 _PATH_WRITE_METHODS = frozenset({"write_text", "write_bytes"})
 
+# os.<attr> file-move/link calls: attr -> index of the DESTINATION arg. A move to
+# an absolute/home/.. literal escapes CAD_OUT just like an open(...,'w') would.
+_OS_MOVE_CALLS = {"rename": 1, "replace": 1, "link": 1, "symlink": 1}
+
+# os.open flag attributes that imply a write (vs O_RDONLY, the default read).
+_OS_WRITE_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_CREAT", "O_APPEND", "O_TRUNC"})
+
 DEFAULT_MAX_BYTES = 100 * 1024  # 100 KB
 
 
 def _is_write_mode(mode: str) -> bool:
     return any(c in mode for c in ("w", "a", "x", "+"))
+
+
+def _has_write_flag(node: ast.AST) -> bool:
+    """True if an os.open flags expression statically contains a write flag
+    (os.O_WRONLY / O_RDWR / O_CREAT / O_APPEND / O_TRUNC), possibly OR'd."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and sub.attr in _OS_WRITE_FLAGS:
+            return True
+        if isinstance(sub, ast.Name) and sub.id in _OS_WRITE_FLAGS:
+            return True
+    return False
 
 
 def _literal_path(node: ast.AST) -> str | None:
@@ -92,8 +110,12 @@ def _path_mentions_cad_out(node: ast.AST) -> bool:
 
 
 def _absolute_or_home_literal(path: str) -> bool:
-    """A literal path that escapes the CAD_OUT sandbox: absolute or ~-rooted."""
-    return path.startswith("/") or path.startswith("~") or path.startswith("\\\\")
+    """A literal path that escapes CAD_OUT: absolute, ~-rooted, UNC, or containing
+    a '..' parent-dir segment (cwd=CAD_OUT is NOT a boundary for '..')."""
+    if path.startswith("/") or path.startswith("~") or path.startswith("\\\\"):
+        return True
+    parts = path.replace("\\", "/").split("/")
+    return ".." in parts
 
 
 class _Visitor(ast.NodeVisitor):
@@ -133,6 +155,36 @@ class _Visitor(ast.NodeVisitor):
             self._check_attr_call(node, func)
         self.generic_visit(node)
 
+    def _escaping_literal(self, target: ast.AST) -> str | None:
+        """If a write-target expression PROVABLY escapes CAD_OUT, return the
+        offending literal string; else None (dynamic/relative-in-bounds paths are
+        allowed — the sandbox covers what the AST can't statically resolve).
+
+        Handles a bare string literal AND os.path.join(...) with literal parts
+        (so os.path.join('..','..','etc') and os.path.join('/etc','x') are caught,
+        while os.path.join(OUT, 'part.stl') is allowed).
+        """
+        # CAD_OUT-referencing expressions are always in-bounds.
+        if _path_mentions_cad_out(target):
+            return None
+        lit = _literal_path(target)
+        if lit is not None:
+            if _absolute_or_home_literal(lit) and "CAD_OUT" not in lit:
+                return lit
+            return None
+        # os.path.join(a, b, ...) with literal parts
+        if (isinstance(target, ast.Call) and isinstance(target.func, ast.Attribute)
+                and target.func.attr == "join"):
+            parts = [_literal_path(a) for a in target.args]
+            str_parts = [p for p in parts if p is not None]
+            joined = "/".join(str_parts)
+            # an absolute first part, a '~', or a '..' segment anywhere -> escape
+            if str_parts and _absolute_or_home_literal(str_parts[0]):
+                return joined
+            if any(".." == p or ".." in p.replace("\\", "/").split("/") for p in str_parts):
+                return joined
+        return None
+
     def _check_open(self, node: ast.Call) -> None:
         mode = "r"
         if len(node.args) >= 2:
@@ -148,38 +200,64 @@ class _Visitor(ast.NodeVisitor):
             return  # reads are fine
         if not node.args:
             return
-        target = node.args[0]
-        lit = _literal_path(target)
-        if lit is not None and _absolute_or_home_literal(lit):
-            # a literal absolute/home path that doesn't mention CAD_OUT -> reject
-            if "CAD_OUT" not in lit and not _path_mentions_cad_out(target):
-                self._add(node.lineno, f"open() writing outside CAD_OUT: {lit!r}")
-        # dynamic / relative / CAD_OUT-referencing paths: allowed (sandbox covers)
+        esc = self._escaping_literal(node.args[0])
+        if esc is not None:
+            self._add(node.lineno, f"open() writing outside CAD_OUT: {esc!r}")
 
     def _check_attr_call(self, node: ast.Call, func: ast.Attribute) -> None:
         attr = func.attr
+        base = func.value
+        is_os = (isinstance(base, ast.Name) and base.id == "os") or \
+                (isinstance(base, ast.Attribute) and base.attr == "os")
         # os.system / os.popen / os.exec* / os.spawn* / os.fork ...
-        if attr in BANNED_OS_CALLS:
-            base = func.value
-            if isinstance(base, ast.Name) and base.id == "os":
-                self._add(node.lineno, f"banned os.{attr}(...)")
-            elif isinstance(base, ast.Attribute) and base.attr == "os":
-                self._add(node.lineno, f"banned os.{attr}(...)")
+        if attr in BANNED_OS_CALLS and is_os:
+            self._add(node.lineno, f"banned os.{attr}(...)")
+        # os.open(path, flags) with a write flag -> a write to the target path
+        if attr == "open" and is_os:
+            self._check_os_open(node)
+        # os.rename/replace/link/symlink(src, DEST) escaping CAD_OUT
+        if attr in _OS_MOVE_CALLS and is_os:
+            self._check_move(node, f"os.{attr}", _OS_MOVE_CALLS[attr])
+        # shutil.move(src, DEST)
+        if attr == "move" and isinstance(base, ast.Name) and base.id == "shutil":
+            self._check_move(node, "shutil.move", 1)
         # subprocess.* called via attribute even if 'subprocess' slipped past
-        if isinstance(func.value, ast.Name) and func.value.id == "subprocess":
+        if isinstance(base, ast.Name) and base.id == "subprocess":
             self._add(node.lineno, f"banned subprocess.{attr}(...)")
-        # pathlib Path(...).write_text/write_bytes to an absolute/home literal
+        # pathlib Path(...).write_text/write_bytes to an escaping literal
         if attr in _PATH_WRITE_METHODS:
             self._check_path_write(node, func)
 
+    def _check_os_open(self, node: ast.Call) -> None:
+        # write only when the flags arg statically carries a write flag; a bare
+        # os.open(path) or O_RDONLY is a read (allowed).
+        flags = node.args[1] if len(node.args) >= 2 else None
+        for kw in node.keywords:
+            if kw.arg == "flags":
+                flags = kw.value
+        if flags is None or not _has_write_flag(flags):
+            return
+        if not node.args:
+            return
+        esc = self._escaping_literal(node.args[0])
+        if esc is not None:
+            self._add(node.lineno, f"os.open() writing outside CAD_OUT: {esc!r}")
+
+    def _check_move(self, node: ast.Call, what: str, dest_idx: int) -> None:
+        if len(node.args) <= dest_idx:
+            return
+        esc = self._escaping_literal(node.args[dest_idx])
+        if esc is not None:
+            self._add(node.lineno, f"{what}() moving outside CAD_OUT: {esc!r}")
+
     def _check_path_write(self, node: ast.Call, func: ast.Attribute) -> None:
-        # func.value is the Path(...) expression; find a literal path inside it
+        # func.value is the Path(...) expression; check its first literal arg
         base = func.value
         if isinstance(base, ast.Call) and isinstance(base.func, ast.Name) and base.func.id == "Path":
             if base.args:
-                lit = _literal_path(base.args[0])
-                if lit is not None and _absolute_or_home_literal(lit) and "CAD_OUT" not in lit:
-                    self._add(node.lineno, f"Path.{func.attr}() writing outside CAD_OUT: {lit!r}")
+                esc = self._escaping_literal(base.args[0])
+                if esc is not None:
+                    self._add(node.lineno, f"Path.{func.attr}() writing outside CAD_OUT: {esc!r}")
 
 
 def check_code(
@@ -210,9 +288,12 @@ def check_code(
     try:
         tree = ast.parse(src)
     except SyntaxError as e:
+        # Emit the canonical CamelCase token "SyntaxError" so the ReAct loop's
+        # summarize_error() hint mapping (which greps for "SyntaxError") fires and
+        # the agent gets an actionable hint (review finding #6).
         return {
             "ok": False,
-            "violations": [f"line {e.lineno or 0}: syntax error: {e.msg}"],
+            "violations": [f"line {e.lineno or 0}: SyntaxError: {e.msg}"],
             "skipped": False,
         }
 

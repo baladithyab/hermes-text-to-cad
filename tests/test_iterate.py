@@ -206,6 +206,21 @@ def test_retry_reuses_out_dir_across_attempts():
     assert seen_out_dirs[1] == "/tmp/cad_attempt1"   # second attempt reuses it
 
 
+def test_ast_rejection_syntaxerror_yields_hint():
+    """Review #6: an AST-rejected SyntaxError must still give the ReAct loop an
+    actionable hint. safety emits the canonical 'SyntaxError' token so
+    summarize_error's _ERROR_HINTS mapping fires through the rejection stderr."""
+    import hermes_text_to_cad.safety as safety
+    rep = safety.check_code("def (:\n  pass")           # a real syntax error
+    assert not rep["ok"]
+    rejection_stderr = "rejected by AST safety pre-check: " + "; ".join(rep["violations"])
+    summ = core.summarize_error(rejection_stderr)
+    assert summ is not None
+    # the canonical token makes the syntax-error hint fire (non-empty, actionable)
+    assert summ["hint"]
+    assert "syntax" in summ["hint"].lower()
+
+
 def test_retry_first_attempt_succeeds_no_loop():
     def ok(code, out_dir=None, stem="part"):
         return {"success": True, "stl": "/x/part.stl", "stderr": "", "out_dir": "/x"}
