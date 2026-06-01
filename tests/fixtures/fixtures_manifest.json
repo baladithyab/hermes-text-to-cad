@@ -1,0 +1,38 @@
+{
+  "holed_box": {
+    "bbox": [
+      40.0,
+      30.0,
+      20.0
+    ],
+    "euler": 0,
+    "genus": 1.0,
+    "watertight": true,
+    "shells": 1,
+    "vol": 22995.11
+  },
+  "solid_box": {
+    "bbox": [
+      40.0,
+      30.0,
+      20.0
+    ],
+    "euler": 2,
+    "genus": 0.0,
+    "watertight": true,
+    "shells": 1,
+    "vol": 24000.0
+  },
+  "hollow_box": {
+    "bbox": [
+      40.0,
+      30.0,
+      20.0
+    ],
+    "euler": 0,
+    "genus": 1.0,
+    "watertight": true,
+    "shells": 1,
+    "vol": 7051.51
+  }
+}

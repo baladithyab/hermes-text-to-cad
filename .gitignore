@@ -20,3 +20,8 @@ v2_*.png
 vtk_*.png
 out/
 .DS_Store
+
+# Test fixtures are committed deterministically (generated in the CAD venv) so
+# unit tests have a stable ground-truth mesh without needing the CAD stack.
+!tests/fixtures/*.stl
+!tests/fixtures/*.step

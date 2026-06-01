@@ -17,7 +17,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pyyaml>=6.0"]
+dev = ["pytest>=7.0", "pyyaml>=6.0", "jsonschema>=4.0"]
 # The 'cad' extra documents what `hermes cad setup` installs into ~/.venvs/cad.
 # It is NOT installed into the Hermes venv by `hermes plugins install`.
 cad = [
