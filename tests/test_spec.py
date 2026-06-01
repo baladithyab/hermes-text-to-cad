@@ -78,6 +78,31 @@ def test_derive_spec_no_hole_omits_through_holes():
     assert "through_holes" not in spec
 
 
+def test_derive_spec_hole_free_is_not_a_hole():
+    # "hole-free" / "no holes" / "without holes" are NEGATIONS — zero holes.
+    for prompt in ("a hole-free plate 50x50x5",
+                   "a solid block, no holes",
+                   "a plate without holes"):
+        spec = core.derive_spec(prompt)
+        assert "through_holes" not in spec, f"{prompt!r} should derive no through_holes"
+
+
+def test_derive_spec_whole_word_not_a_hole():
+    # "whole" must not match the hole keyword (substring trap).
+    spec = core.derive_spec("a whole bracket 40x30x20")
+    assert "through_holes" not in spec
+
+
+def test_derive_spec_numeric_multi_hole_count():
+    spec = core.derive_spec("a 12-hole flange 80x80x10")
+    assert spec["through_holes"] == 12
+
+
+def test_derive_spec_counterbored_hole_counts_as_one():
+    spec = core.derive_spec("a plate with a counterbored hole")
+    assert spec["through_holes"] == 1
+
+
 def test_derive_spec_defaults_watertight_true():
     spec = core.derive_spec("a 10x10x10 cube")
     assert spec["watertight"] is True

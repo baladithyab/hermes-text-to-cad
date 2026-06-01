@@ -56,16 +56,28 @@ _NUM_WORDS = {
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
     "twelve": 12,
 }
+_NUM_WORD_ALT = (r"a|an|one|two|three|four|five|six|seven|eight|nine|ten|"
+                 r"eleven|twelve")
 
 # "through hole", "through-hole", "thru hole", "mounting hole(s)", "bore" — all
 # imply a hole that passes through the body (adds genus). "blind hole" does NOT.
+# The hole keyword is \b-anchored on BOTH sides so substrings like "whole" can
+# never match; an optional count (digits or a number-word) may precede it.
 _THROUGH_HOLE_RE = re.compile(
-    r"\b(?:(\d+)|([a-z]+))?[\s-]*"
-    r"(?:through|thru|mounting|clearance)?[\s-]*(?:through[\s-]*)?"
-    r"(?:hole|bore|bolt[\s-]*hole)s?\b",
+    r"(?:\b(\d+)|\b(" + _NUM_WORD_ALT + r"))?"
+    r"[\s-]*"
+    r"(?:through|thru|mounting|clearance|counterbored|countersunk|cbore|csk|bolt|drilled)?"
+    r"[\s-]*(?:through[\s-]*|thru[\s-]*)?"
+    r"\b(?:through[\s-]*hole|thru[\s-]*hole|bore|hole)s?\b",
     re.IGNORECASE,
 )
 _BLIND_RE = re.compile(r"\bblind\s+(?:hole|bore)s?\b", re.IGNORECASE)
+# Negations: "hole-free", "holeless", "no holes", "without holes", "zero holes".
+_NO_HOLE_RE = re.compile(
+    r"\bhole[\s-]*free\b|\bholeless\b|"
+    r"\b(?:no|without|zero)\s+(?:through[\s-]*|thru[\s-]*|mounting\s+|clearance\s+)?holes?\b",
+    re.IGNORECASE,
+)
 _ASSEMBLY_RE = re.compile(
     r"\b(?:assembly|two[\s-]*part|multi[\s-]*part|snap[\s-]*fit|"
     r"(\d+)[\s-]*(?:part|piece)s?)\b",
@@ -94,23 +106,20 @@ def derive_spec(prompt: str) -> dict[str, Any]:
     if m:
         spec["bbox_mm"] = [float(m.group(1)), float(m.group(2)), float(m.group(3))]
 
-    # Through-holes: count blind holes out, then look for a through/mounting hole
-    # phrase with an optional leading count ("4 mounting holes", "three through-holes").
-    if not _BLIND_RE.search(low):
+    # Through-holes. Skip entirely if the prompt NEGATES holes ("hole-free",
+    # "no holes") or describes only a blind hole (which adds no genus). Then look
+    # for a through/mounting hole phrase with an optional leading count
+    # ("4 mounting holes", "three through-holes", "12-hole flange").
+    if not _NO_HOLE_RE.search(low) and not _BLIND_RE.search(low):
         hm = _THROUGH_HOLE_RE.search(low)
         if hm:
             num, word = hm.group(1), hm.group(2)
-            count = None
             if num:
                 count = int(num)
-            elif word and word in _NUM_WORDS:
-                count = _NUM_WORDS[word]
-            elif word is None:
-                count = 1  # "...with a hole" / bare "hole"
-            # a bare matched word that isn't a number-word (e.g. "drilled hole")
-            # still means at least one hole.
-            if count is None:
-                count = 1
+            elif word:
+                count = _NUM_WORDS.get(word.lower(), 1)
+            else:
+                count = 1  # bare "hole" / "...with a hole"
             spec["through_holes"] = count
 
     # Multi-body intent relaxes the single-shell default.
