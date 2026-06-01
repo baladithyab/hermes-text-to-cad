@@ -17,6 +17,13 @@ from .hermes_text_to_cad import core
 
 logger = logging.getLogger(__name__)
 
+# Authoritative tool list (mirrors plugin.yaml provides_tools; the contract test
+# asserts they match). Keep in sync with the register_tool calls below.
+TOOL_NAMES = (
+    "cad_spec_from_prompt", "cad_plan", "cad_generate",
+    "cad_render", "cad_measure", "cad_review",
+)
+
 
 # ---- tool handlers --------------------------------------------------------
 # Hermes dispatch calls handlers as handler(args: dict, **kwargs) and JSON-encodes
@@ -24,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 def _cad_spec_from_prompt(args: dict, **_kw: Any) -> dict[str, Any]:
     return core.spec_from_prompt(prompt=args["prompt"], out_path=args.get("out_path"))
+
+
+def _cad_plan(args: dict, **_kw: Any) -> dict[str, Any]:
+    return core.plan_from_prompt(prompt=args["prompt"], out_path=args.get("out_path"))
 
 
 def _cad_generate(args: dict, **_kw: Any) -> dict[str, Any]:
@@ -87,6 +98,30 @@ def register(ctx: Any) -> None:
                 "properties": {
                     "prompt": {"type": "string", "description": "Natural-language description of the part."},
                     "out_path": {"type": "string", "description": "Optional path to write spec.json (for cad_measure --spec)."},
+                },
+            },
+        },
+    )
+    ctx.register_tool(
+        name="cad_plan",
+        toolset="cad",
+        handler=_cad_plan,
+        description=("Emit a structured modeling PLAN (primitives -> operations -> features -> "
+                     "export) from a part prompt before codegen — the CAD-Coder chain-of-thought "
+                     "pattern that measurably improves code validity. Deterministic (no model "
+                     "call): seeded from the same derived spec cad_measure asserts, so the plan "
+                     "and the numeric gate agree. Optional step 1.5 — expand the plan's "
+                     "`operations` into CadQuery, then call cad_generate."),
+        emoji="🧭",
+        schema={
+            "name": "cad_plan",
+            "description": "NL prompt -> structured modeling plan (primitives/operations/features/export).",
+            "parameters": {
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                    "prompt": {"type": "string", "description": "Natural-language description of the part."},
+                    "out_path": {"type": "string", "description": "Optional path to write plan.json."},
                 },
             },
         },
@@ -185,4 +220,4 @@ def register(ctx: Any) -> None:
         handler_fn=_cli_cad,
         description="hermes-text-to-cad plugin CLI",
     )
-    logger.info("hermes-text-to-cad: registered 5 tools + `cad` CLI")
+    logger.info("hermes-text-to-cad: registered %d tools + `cad` CLI", len(TOOL_NAMES))

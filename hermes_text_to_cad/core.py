@@ -271,6 +271,89 @@ def spec_from_prompt(prompt: str, out_path: str | None = None) -> dict[str, Any]
     return {"success": True, "spec": spec, "spec_path": written}
 
 
+# ---- explicit CoT modeling plan (CAD-Coder pattern) -------------------------
+# An optional, deterministic plan step before codegen: primitives -> operations
+# -> features -> export. CAD-Coder shows an explicit CoT plan improves codegen
+# validity. core.plan is a SCAFFOLD seeded from derive_spec (so the plan carries
+# the SAME spec the numeric gate will assert — plan↔gate coherence); the agent
+# expands operations/features into concrete CadQuery before cad_generate. Kept
+# LLM-free and unit-testable offline, exactly like derive_spec / iterate.
+
+def plan(prompt: str) -> dict[str, Any]:
+    """Deterministic modeling plan scaffold from an NL prompt (ADR-0007).
+
+    Returns {prompt, spec, primitives, operations, features, export, notes}.
+    Deterministic by design — the agent fills in operations/features with real
+    CadQuery calls. Reuses derive_spec so the plan and the numeric gate agree.
+    """
+    spec = derive_spec(prompt)
+
+    primitives: list[str] = []
+    bbox = spec.get("bbox_mm")
+    if bbox:
+        l, w, h = bbox
+        primitives.append(
+            f"box {l:g}x{w:g}x{h:g} mm "
+            f"(cq.Workplane('XY').box({l:g}, {w:g}, {h:g}))"
+        )
+    else:
+        primitives.append("base solid — dimensions unspecified; pick from the prompt")
+
+    features: list[str] = []
+    th = spec.get("through_holes")
+    if th:
+        plural = "s" if th != 1 else ""
+        features.append(
+            f"through_hole x{th}: {th} hole{plural} passing fully through the body "
+            f"(.faces(...).workplane().hole(d) or .cutThruAll()); "
+            f"numeric gate asserts through_holes == {th}"
+        )
+    if spec.get("max_shells", 1) > 1:
+        features.append(
+            f"multi-body: up to {spec['max_shells']} connected bodies "
+            f"(assembly/snap-fit); gate asserts n_shells <= {spec['max_shells']}"
+        )
+    if spec.get("internal_features"):
+        features.append(
+            "internal feature (channel/bore/cavity) — request a SECTION render so "
+            "the vision gate can see the hidden geometry"
+        )
+
+    export = [
+        "part.stl  (mesh — render + numeric gate + 3D printing)",
+        "part.step (B-rep — manufacturing; CadQuery only, OpenSCAD is mesh-only)",
+    ]
+
+    notes = (
+        "Agent: expand `operations` into concrete CadQuery calls (booleans, "
+        "shell, fillet, patterns) that realize the `features`, then call "
+        "cad_generate. Keep dimensions consistent with `spec` so the numeric "
+        "gate passes. `operations` is intentionally empty — it's yours to fill."
+    )
+
+    return {
+        "prompt": prompt,
+        "spec": spec,
+        "primitives": primitives,
+        "operations": [],   # agent fills: booleans / shell / fillet / patterns
+        "features": features,
+        "export": export,
+        "notes": notes,
+    }
+
+
+def plan_from_prompt(prompt: str, out_path: str | None = None) -> dict[str, Any]:
+    """Tool-facing wrapper around plan(). Optionally writes plan.json."""
+    p = plan(prompt)
+    written = None
+    if out_path:
+        path = Path(out_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(p, indent=2) + "\n")
+        written = str(path)
+    return {"success": True, "plan": p, "plan_path": written}
+
+
 # ---- ReAct error-feedback loop ----------------------------------------------
 # When CadQuery raises (bad fillet radius, OCC kernel error, non-manifold), the
 # traceback is the most valuable signal for the next attempt. summarize_error

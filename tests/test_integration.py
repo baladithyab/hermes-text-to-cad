@@ -316,3 +316,33 @@ def test_sandbox_blocks_network_and_masks_secrets(tmp_path, monkeypatch):
     report = json.loads((tmp_path / "probe.json").read_text())
     assert report["net"].startswith("blocked:"), f"network NOT blocked: {report['net']}"
     assert report["hermes_env_readable"] is False, "~/.hermes/.env was readable in sandbox!"
+
+
+# ---- Wave 2.3: cad_plan consumed by codegen, end-to-end ----------------------
+
+def test_plan_feeds_codegen_end_to_end(tmp_path):
+    """ADR-0007 acceptance: the plan's spec + export list drive a real
+    cad_generate that then PASSES the numeric gate derived from the same prompt
+    — proving plan↔gate coherence on real geometry."""
+    prompt = "a 40x30x20 block with a through hole"
+    pl = core.plan(prompt)
+    # the agent reads the plan and writes CadQuery realizing primitives+features
+    assert any("box" in s.lower() for s in pl["primitives"])
+    assert any("hole" in f.lower() for f in pl["features"])
+
+    l, w, h = pl["spec"]["bbox_mm"]
+    CODE = (
+        "import cadquery as cq, os\n"
+        "OUT = os.environ['CAD_OUT']\n"
+        f"part = cq.Workplane('XY').box({l}, {w}, {h})"
+        ".faces('>Z').workplane().hole(8)\n"
+        "cq.exporters.export(part, os.path.join(OUT, 'part.stl'))\n"
+        "cq.exporters.export(part, os.path.join(OUT, 'part.step'))\n"
+    )
+    gen = core.generate(code=CODE, out_dir=str(tmp_path), stem="part")
+    assert gen["success"], gen.get("stderr")
+
+    # the SAME prompt's spec gates the result (coherence)
+    spec_res = core.spec_from_prompt(prompt, out_path=str(tmp_path / "spec.json"))
+    meas = core.measure(stl=gen["stl"], spec_path=spec_res["spec_path"])
+    assert meas["gate_pass"] is True, meas["report"]
