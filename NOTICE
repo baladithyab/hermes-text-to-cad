@@ -1,0 +1,43 @@
+# NOTICE — third-party attributions and license boundaries
+
+This plugin (`hermes-text-to-cad`) is licensed under the MIT License
+(see `LICENSE`). It was developed with reference to two open-source projects.
+This file records how each was used and the license posture applied to each.
+
+## earthtojake/text-to-cad — MIT License
+
+- Source: https://github.com/earthtojake/text-to-cad
+- License: MIT (Copyright (c) 2026 earthtojake) — top-level and per-skill.
+- Posture: **ADOPT WITH ATTRIBUTION.** Because the source is MIT, techniques
+  and code may be adopted/adapted directly. Heavily-adapted, original
+  reimplementations in our Python/VTK stack drew on its approach to:
+    - PBR + image-based-lighting + studio-rig + filmic-tone-mapping rendering
+      driven from a per-body-colored GLB (our `scripts/pbr.py`, `scripts/render.py`)
+    - the STEP → GLB + topology-sidecar generator/artifact pipeline
+      (our `scripts/export_artifacts.py`)
+    - the declared coordinate-frame / named-features / spec-as-ground-truth
+      methodology and the derive→validate→smallest-repair loop
+  Per the MIT terms, this copyright notice is preserved here. Where any code is
+  lifted closer to verbatim in future, the MIT permission notice travels with it.
+
+## Adam-CAD/CADAM — GPL-3.0 License
+
+- Source: https://github.com/Adam-CAD/CADAM
+- License: GNU GPL-3.0 (strong copyleft).
+- Posture: **IDEAS-ONLY, CLEAN-ROOM.** GPL-3.0 is copyleft: copying its source
+  into this MIT plugin would force the whole plugin under GPL. Therefore NONE of
+  CADAM's source or prompt/spec text was copied. Only high-level *concepts*
+  (described in our own words, cited by file:line in
+  `docs/research/reference-steal.md`) informed original implementations:
+    - intent-preservation guard ("model what was asked, don't embellish")
+    - "never claim success unless the tool actually ran" self-check principle
+    - compile/validate → repair-on-failure loop principle
+    - steering organic/threaded geometry to sweep/loft/library primitives rather
+      than stacked solids (we ship our own first-party `scripts/cad_helpers.py`;
+      no BOSL2 or other GPL/external library is vendored)
+  No GPL-licensed expression is present in this repository.
+
+---
+This plugin remains MIT-licensed. See `docs/research/reference-steal.md` for the
+full clean-room study with per-claim citations, and `docs/adr/0010`–`0013` for
+the decisions that adopted these techniques.

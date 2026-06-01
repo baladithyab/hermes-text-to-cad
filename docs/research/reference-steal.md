@@ -4,7 +4,12 @@
 
 ## LICENSE GUARD
 
-The studied references carry **copyleft / restrictive** licenses — `text-to-cad`/earthtojake is **MIT** but `CADAM` is **GPL-3.0** (a copyleft license that would virally relicense any derived code). Our repo is MIT/public, so we applied a strict **clean-room** discipline to BOTH regardless: nothing in this document or the implementation is copied code or copied prompt/spec text. This file records only **ideas and techniques described in our own words**, with `file:line` citations back to the references so a reviewer can independently confirm each claim was learned, not lifted. (An earlier draft labelled both repos "all-rights-reserved"; the stricter-than-required discipline still holds, and the GPL-3.0 source in particular makes avoiding any protected expression mandatory — which the original Python/VTK implementations do.)
+The two references carry **different** licenses, and our posture differs per license (see `NOTICE` for the canonical statement):
+
+- **`text-to-cad`/earthtojake = MIT.** Posture: **ADOPT WITH ATTRIBUTION.** MIT permits adopting/adapting its code directly; we preserve its copyright notice in `NOTICE`. Our implementations are original Python/VTK reimplementations that drew on its approach (rendering, GLB+topology pipeline, spec-as-ground-truth). We may lift closer-to-verbatim in future as long as the MIT permission notice travels with it.
+- **`CADAM` = GPL-3.0 (strong copyleft).** Posture: **IDEAS-ONLY, CLEAN-ROOM.** Copying GPL source into this MIT plugin would relicense the whole plugin under GPL, so NONE of CADAM's source or prompt/spec text was copied — only high-level concepts described in our own words informed original code.
+
+Either way, this file records only **ideas and techniques described in our own words**, with `file:line` citations so a reviewer can independently confirm each claim was learned, not lifted. (An earlier draft over-cautiously labelled both repos "all-rights-reserved" / treated both as strict clean-room; the implementation is unaffected — it is original throughout — but the correct posture is per-license as above.)
 
 ## TL;DR — what to adopt and why
 
